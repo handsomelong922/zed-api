@@ -84,6 +84,13 @@ export interface UsageInfo {
   [key: string]: unknown
 }
 
+export interface LoginState {
+  status?: string
+  login_url?: string
+  port?: number
+  error?: string
+}
+
 export async function fetchAccounts(): Promise<AccountsResponse> {
   const r = await fetch('/zed/accounts')
   if (!r.ok) throw new Error(`${r.status}`)
@@ -135,18 +142,40 @@ export async function fetchBilling(): Promise<Record<string, unknown>> {
   return r.json()
 }
 
-export async function startLogin(name?: string): Promise<{ login_url?: string; error?: string }> {
+export async function startLogin(name?: string): Promise<LoginState> {
   const r = await fetch('/zed/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(name ? { name } : {}),
   })
-  return r.json()
+  const data = await r.json() as LoginState
+  if (!r.ok && !data.error) data.error = `${r.status}`
+  return data
 }
 
-export async function fetchLoginStatus(): Promise<{ status: string }> {
+export async function fetchLoginStatus(): Promise<LoginState> {
   const r = await fetch('/zed/login/status')
-  return r.json()
+  const data = await r.json() as LoginState
+  if (!r.ok) throw new Error(data.error ?? `${r.status}`)
+  return data
+}
+
+export async function completeLogin(callbackUrl: string): Promise<LoginState> {
+  const r = await fetch('/zed/login/complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ callback_url: callbackUrl }),
+  })
+  const data = await r.json() as LoginState
+  if (!r.ok) throw new Error(data.error ?? `${r.status}`)
+  return data
+}
+
+export async function cancelLogin(): Promise<LoginState> {
+  const r = await fetch('/zed/login/cancel', { method: 'POST' })
+  const data = await r.json() as LoginState
+  if (!r.ok) throw new Error(data.error ?? `${r.status}`)
+  return data
 }
 
 export interface ChatMessage {
