@@ -3,12 +3,15 @@ name: Hotfix Current Zed Protocol
 on:
   push:
     branches: [fix/current-zed-stream-protocol]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   red-green-hotfix:
+    if: github.event_name == 'push' || github.head_ref == 'fix/current-zed-stream-protocol'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
