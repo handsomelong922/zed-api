@@ -1,5 +1,7 @@
 import {
+  cancelLogin,
   checkAccountHealth,
+  completeLogin,
   fetchAccounts,
   fetchAccountStatuses,
   fetchLoginStatus,
@@ -421,7 +423,7 @@ export function renderAccounts() {
 
     <button class="add-account-card" id="add-account-button" type="button">
       <span class="add-account-icon">${icons.plus}</span>
-      <span><strong>添加 Zed 账号</strong><small>通过 GitHub OAuth 完成登录，不在页面中输入或保存密码</small></span>
+      <span><strong>添加 Zed 账号</strong><small>通过本地浏览器完成 GitHub OAuth，服务器不会打开浏览器</small></span>
       <span class="add-account-arrow">${icons.arrowRight}</span>
     </button>
     <div class="login-banner" id="login-banner" hidden></div>
@@ -431,6 +433,41 @@ export function renderAccounts() {
   document.getElementById('refresh-accounts-button')!.addEventListener('click', () => void refreshAccountData())
   document.getElementById('check-all-button')!.addEventListener('click', () => void runHealthCheck())
   void loadAccounts()
+  void restoreOAuthLogin()
+}
+
+function renderPendingOAuth(loginUrl?: string) {
+  const banner = document.getElementById('login-banner')!
+  const addButton = document.getElementById('add-account-button') as HTMLButtonElement
+  addButton.disabled = true
+  banner.hidden = false
+
+  const authLink = loginUrl
+    ? `<a href="${escapeHtml(loginUrl)}" target="_blank" rel="noreferrer" style="margin-left:0">打开授权页面 ${icons.externalLink}</a>`
+    : '<span class="error-text">授权链接暂时不可用，请取消后重新发起。</span>'
+
+  banner.innerHTML = `
+    <div style="width:100%;display:grid;gap:12px">
+      <div>
+        <strong>在本地浏览器完成 GitHub / Zed 授权</strong>
+        <p style="margin:5px 0 0;line-height:1.7">${authLink}</p>
+      </div>
+      <div style="line-height:1.7">
+        授权完成后浏览器会跳到 <code>127.0.0.1</code> 并显示“无法访问此网站”，这是远程部署的正常现象。
+        <strong>请复制浏览器地址栏里的完整网址，然后粘贴到下面。</strong>
+      </div>
+      <textarea id="login-callback-url" rows="4" spellcheck="false" autocomplete="off"
+        placeholder="http://127.0.0.1:xxxxx/?user_id=...&access_token=..."
+        style="width:100%;box-sizing:border-box;resize:vertical;padding:10px 12px;border:1px solid #b8c5d5;border-radius:9px;font:11px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace"></textarea>
+      <div style="display:flex;flex-wrap:wrap;gap:9px">
+        <button class="button primary" id="complete-login-button" type="button">完成添加账号</button>
+        <button class="button secondary" id="cancel-login-button" type="button">取消并重新登录</button>
+      </div>
+    </div>
+  `
+
+  document.getElementById('complete-login-button')!.addEventListener('click', () => void submitOAuthCallback())
+  document.getElementById('cancel-login-button')!.addEventListener('click', () => void cancelOAuthLogin())
 }
 
 async function startOAuthLogin() {
@@ -438,7 +475,7 @@ async function startOAuthLogin() {
   const button = document.getElementById('add-account-button') as HTMLButtonElement
   button.disabled = true
   banner.hidden = false
-  banner.innerHTML = '<span class="spinner"></span><span>正在生成密钥并启动 GitHub OAuth…</span>'
+  banner.innerHTML = '<span class="spinner"></span><span>正在生成本次授权链接…</span>'
 
   try {
     const data = await startLogin()
@@ -447,43 +484,67 @@ async function startOAuthLogin() {
       button.disabled = false
       return
     }
-
-    banner.innerHTML = `
-      <span class="spinner"></span>
-      <span>等待 GitHub 授权回调，请在浏览器窗口完成登录。</span>
-      ${data.login_url ? `<a href="${escapeHtml(data.login_url)}" target="_blank" rel="noreferrer">打开授权页面 ${icons.externalLink}</a>` : ''}
-    `
-
-    const startedAt = Date.now()
-    const poll = window.setInterval(async () => {
-      if (Date.now() - startedAt > 5 * 60 * 1000) {
-        window.clearInterval(poll)
-        banner.innerHTML = `<span class="error-text">${icons.alertCircle} 登录等待已超时，请重新发起授权。</span>`
-        button.disabled = false
-        return
-      }
-
-      try {
-        const status = await fetchLoginStatus()
-        if (status.status === 'success') {
-          window.clearInterval(poll)
-          banner.innerHTML = `${icons.checkCircle}<span>账号登录成功，正在刷新账号列表。</span>`
-          button.disabled = false
-          statuses.clear()
-          showToast('Zed 账号添加成功')
-          await loadAccounts()
-          window.setTimeout(() => { banner.hidden = true }, 3000)
-        } else if (status.status === 'failed') {
-          window.clearInterval(poll)
-          banner.innerHTML = `<span class="error-text">${icons.xCircle} 登录失败，请重新尝试。</span>`
-          button.disabled = false
-        }
-      } catch {
-        // OAuth 工作线程更新状态时可能短暂不可读，保留轮询即可。
-      }
-    }, 1500)
+    renderPendingOAuth(data.login_url)
   } catch (error) {
     banner.innerHTML = `<span class="error-text">${icons.xCircle} 登录启动失败：${error instanceof Error ? escapeHtml(error.message) : '未知错误'}</span>`
     button.disabled = false
+  }
+}
+
+async function submitOAuthCallback() {
+  const input = document.getElementById('login-callback-url') as HTMLTextAreaElement | null
+  const completeButton = document.getElementById('complete-login-button') as HTMLButtonElement | null
+  if (!input || !completeButton) return
+
+  const callbackUrl = input.value.trim()
+  if (!callbackUrl) {
+    showToast('请先粘贴以 127.0.0.1 开头的完整授权回调网址')
+    input.focus()
+    return
+  }
+
+  completeButton.disabled = true
+  completeButton.innerHTML = '<span class="spinner"></span>正在导入账号'
+  try {
+    await completeLogin(callbackUrl)
+    const banner = document.getElementById('login-banner')!
+    const addButton = document.getElementById('add-account-button') as HTMLButtonElement
+    banner.innerHTML = `${icons.checkCircle}<span>账号登录成功，正在刷新账号列表。</span>`
+    addButton.disabled = false
+    statuses.clear()
+    showToast('Zed 账号添加成功')
+    await loadAccounts()
+    window.setTimeout(() => { banner.hidden = true }, 3000)
+  } catch (error) {
+    completeButton.disabled = false
+    completeButton.textContent = '完成添加账号'
+    showToast(`回调网址导入失败：${error instanceof Error ? error.message : '未知错误'}`)
+    input.focus()
+  }
+}
+
+async function cancelOAuthLogin() {
+  const cancelButton = document.getElementById('cancel-login-button') as HTMLButtonElement | null
+  if (cancelButton) cancelButton.disabled = true
+  try {
+    await cancelLogin()
+    const banner = document.getElementById('login-banner')!
+    const addButton = document.getElementById('add-account-button') as HTMLButtonElement
+    banner.hidden = true
+    banner.innerHTML = ''
+    addButton.disabled = false
+    showToast('已取消本次登录，可以重新添加账号')
+  } catch (error) {
+    if (cancelButton) cancelButton.disabled = false
+    showToast(`取消登录失败：${error instanceof Error ? error.message : '未知错误'}`)
+  }
+}
+
+async function restoreOAuthLogin() {
+  try {
+    const state = await fetchLoginStatus()
+    if (state.status === 'waiting') renderPendingOAuth(state.login_url)
+  } catch {
+    // 页面主体不依赖登录状态恢复；读取失败时保持“添加账号”按钮可用。
   }
 }
