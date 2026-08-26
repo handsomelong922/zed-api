@@ -60,3 +60,30 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  one-port-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build local amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: zed-api:smoke
+      - name: Verify 1Panel-style port mapping and /login
+        run: |
+          mkdir -p /tmp/zed-api-smoke
+          docker run -d --name zed-api-smoke -p 18001:8001 -v /tmp/zed-api-smoke:/data zed-api:smoke
+          trap 'docker logs zed-api-smoke || true; docker rm -f zed-api-smoke >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18001/login >/tmp/login.html; then
+              grep -q 'Zed API' /tmp/login.html
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'container port 8001 was not reachable through Docker port mapping' >&2
+          exit 1
