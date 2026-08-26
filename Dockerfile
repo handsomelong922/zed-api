@@ -1,6 +1,9 @@
-FROM alpine:3.20 AS builder
+# syntax=docker/dockerfile:1.7
+
+FROM --platform=$BUILDPLATFORM alpine:3.20 AS builder
 
 ARG ZIG_VERSION=0.15.2
+ARG TARGETARCH
 RUN apk add --no-cache ca-certificates curl xz nodejs npm
 RUN set -eux; \
     case "$(uname -m)" in \
@@ -18,11 +21,17 @@ WORKDIR /src
 COPY . .
 RUN zig build test
 RUN cd webui && npm ci && npm run build
-RUN zig build -Doptimize=ReleaseSafe
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) zig_target="x86_64-linux-musl" ;; \
+      arm64) zig_target="aarch64-linux-musl" ;; \
+      *) echo "unsupported target architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    zig build -Dtarget="$zig_target" -Doptimize=ReleaseSafe
 
 FROM alpine:3.20 AS runtime
-RUN apk add --no-cache ca-certificates
 WORKDIR /data
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /src/zig-out/bin/zed2api /usr/local/bin/zed2api
 
 EXPOSE 8001
