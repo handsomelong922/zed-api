@@ -3,12 +3,15 @@ name: Review Fix Committed Stream Failure
 on:
   push:
     branches: [fix/current-zed-stream-protocol]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   red-green-review-fix:
+    if: github.event_name == 'push' || github.head_ref == 'fix/current-zed-stream-protocol'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
