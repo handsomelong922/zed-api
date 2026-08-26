@@ -20,6 +20,12 @@ jobs:
           sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
           echo /opt/zig >> "$GITHUB_PATH"
 
+      - name: Build embedded Web UI
+        run: |
+          cd webui
+          npm ci
+          npm run build
+
       - name: Build release binaries
         run: |
           zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe --prefix dist/amd64
