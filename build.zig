@@ -83,6 +83,15 @@ pub fn build(b: *std.Build) void {
     }
     const run_stream_tests = b.addRunArtifact(stream_tests);
 
+    const completion_status_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/completion_status.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const completion_status_tests = b.addTest(.{ .root_module = completion_status_test_mod });
+    const run_completion_status_tests = b.addRunArtifact(completion_status_tests);
+
     const settings_test_mod = b.createModule(.{
         .root_source_file = b.path("src/settings.zig"),
         .target = target,
@@ -110,6 +119,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run protocol, streaming, settings, and setup regression tests");
     test_step.dependOn(&run_providers_tests.step);
     test_step.dependOn(&run_stream_tests.step);
+    test_step.dependOn(&run_completion_status_tests.step);
     test_step.dependOn(&run_settings_tests.step);
     test_step.dependOn(&run_setup_tests.step);
 }

@@ -3,6 +3,7 @@ const accounts = @import("accounts.zig");
 const zed = @import("zed.zig");
 const proxy = @import("proxy.zig");
 const providers = @import("providers.zig");
+const completion_status = @import("completion_status.zig");
 const socket = @import("socket.zig");
 
 /// Tracks which Anthropic content block is currently open while converting an
@@ -338,6 +339,7 @@ fn doStreamProxy(client_stream: std.net.Stream, acc: *accounts.Account, body: []
     // 上游发出 {"status":"stream_ended"} 后置为 true：完整回答已 relay 完毕，
     // 需主动终止 curl 子进程，否则它会为 --max-time(300s) 一直挂着阻塞收尾。
     var ended_by_marker = false;
+    var responses_terminal_seen = false;
 
     const model_owned = providers.extractModelFromBody(allocator, body) catch null;
     defer if (model_owned) |value| allocator.free(value);
@@ -374,16 +376,37 @@ fn doStreamProxy(client_stream: std.net.Stream, acc: *accounts.Account, body: []
 
             if (line_len > 0) {
                 const line = line_buf[0..line_len];
-                // The marker is protocol metadata, not a model event. Detect it
-                // structurally before sending SSE headers or counting data.
-                if (line[0] == '{' and
-                    std.mem.indexOf(u8, line, "\"status\"") != null and
-                    std.mem.indexOf(u8, line, "\"stream_ended\"") != null and
-                    isStreamEndedMarker(line, allocator))
-                {
-                    line_len = 0;
-                    ended_by_marker = true;
-                    break;
+                // Zed's cloud protocol multiplexes queue/start/failure/end status
+                // messages with provider events. Never commit downstream SSE for
+                // control-plane JSON. In particular, HTTP 200 + status.failed is
+                // an upstream failure, not a successful empty model response.
+                var control = completion_status.parseLine(allocator, line);
+                defer control.deinit(allocator);
+                switch (control.kind) {
+                    .queued, .started, .unknown_status => {
+                        line_len = 0;
+                        continue;
+                    },
+                    .failed => {
+                        const mapped_status = completion_status.suggestedHttpStatus(control);
+                        const is_plan_failure = if (control.message) |message| std.mem.indexOf(u8, message, "plan") != null else false;
+                        const mapped_kind: accounts.FailureKind = if (mapped_status == 401)
+                            .auth
+                        else if (mapped_status == 403)
+                            (if (is_plan_failure) .transient else .auth)
+                        else if (mapped_status == 429)
+                            .rate_limit
+                        else
+                            .transient;
+                        std.debug.print("[stream] upstream completion failed: code={s} message={s}\n", .{ control.code orelse "unknown", control.message orelse "unknown" });
+                        return .{ .ok = false, .kind = mapped_kind, .status = mapped_status };
+                    },
+                    .stream_ended => {
+                        line_len = 0;
+                        ended_by_marker = true;
+                        break;
+                    },
+                    .event, .not_status => {},
                 }
                 if (line[0] == '{') {
                     // Check if this is an error response (non-200 status)
@@ -393,6 +416,15 @@ fn doStreamProxy(client_stream: std.net.Stream, acc: *accounts.Account, body: []
                         line_len = 0;
                         continue;
                     }
+                    const responses_event_class: ResponsesEventClass = if (is_responses)
+                        classifyResponsesEventLine(line, allocator)
+                    else
+                        .event;
+                    if (is_responses and responses_event_class == .none) {
+                        line_len = 0;
+                        continue;
+                    }
+
                     if (!headers_sent) {
                         headers_sent = true;
                         // This server handles one request per TCP connection and
@@ -414,6 +446,7 @@ fn doStreamProxy(client_stream: std.net.Stream, acc: *accounts.Account, body: []
                     }
                     got_any_data = true;
                     if (is_responses) {
+                        if (responses_event_class == .terminal) responses_terminal_seen = true;
                         passThroughResponsesSSE(client_stream, line, allocator) catch
                             return .{ .ok = false, .committed = true, .kind = .transient, .status = http_status };
                     } else if (!is_anthropic) {
@@ -463,6 +496,14 @@ fn doStreamProxy(client_stream: std.net.Stream, acc: *accounts.Account, body: []
     //   self.term 已设置的幂等分支执行 cleanupStreams()，关闭 stdout/stderr 管道
     //   避免 fd 泄漏。
     if (ended_by_marker) {
+        // `stream_ended` is Zed transport metadata, while OpenAI-compatible
+        // clients need a terminal Responses frame. If real provider events were
+        // relayed but no response.completed/failed/incomplete arrived, bridge
+        // the cloud-level end marker to the conventional [DONE] sentinel.
+        if (shouldSendResponsesDone(is_responses, got_any_data, responses_terminal_seen)) {
+            socket.send(client_stream, "data: [DONE]\n\n") catch
+                return .{ .ok = false, .committed = headers_sent, .kind = .transient, .status = http_status };
+        }
         _ = child.kill() catch {};
         if (child.wait()) |_| {
             child_reaped = true;
@@ -964,4 +1005,42 @@ fn emitTextDelta(client_stream: std.net.Stream, text: []const u8, block_index: *
     try std.json.Stringify.encodeJsonString(text, .{}, w);
     try w.writeAll("}}\n\n");
     try socket.send(client_stream, buf.written());
+}
+const ResponsesEventClass = enum { none, event, terminal };
+
+fn classifyResponsesEventLine(line: []const u8, allocator: std.mem.Allocator) ResponsesEventClass {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return .none;
+    defer parsed.deinit();
+    if (parsed.value != .object) return .none;
+    const event_value = parsed.value.object.get("event") orelse parsed.value;
+    if (event_value != .object) return .none;
+    const event_type = switch (event_value.object.get("type") orelse return .none) {
+        .string => |value| value,
+        else => return .none,
+    };
+    if (std.mem.eql(u8, event_type, "response.completed") or
+        std.mem.eql(u8, event_type, "response.failed") or
+        std.mem.eql(u8, event_type, "response.incomplete"))
+    {
+        return .terminal;
+    }
+    return .event;
+}
+
+fn shouldSendResponsesDone(is_responses: bool, got_any_data: bool, terminal_seen: bool) bool {
+    return is_responses and got_any_data and !terminal_seen;
+}
+
+test "Responses stream classifier rejects Zed control messages" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(ResponsesEventClass.none, classifyResponsesEventLine("{\"status\":\"started\"}", allocator));
+    try std.testing.expectEqual(ResponsesEventClass.event, classifyResponsesEventLine("{\"event\":{\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}}", allocator));
+    try std.testing.expectEqual(ResponsesEventClass.terminal, classifyResponsesEventLine("{\"event\":{\"type\":\"response.completed\",\"response\":{\"id\":\"r\"}}}", allocator));
+}
+
+test "Responses stream bridges Zed stream_ended only after real events" {
+    try std.testing.expect(shouldSendResponsesDone(true, true, false));
+    try std.testing.expect(!shouldSendResponsesDone(true, false, false));
+    try std.testing.expect(!shouldSendResponsesDone(true, true, true));
+    try std.testing.expect(!shouldSendResponsesDone(false, true, false));
 }

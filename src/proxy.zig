@@ -13,7 +13,7 @@ pub const SYSTEM_ID = "9d4b8c17-12ae-4091-96bc-1a79ce2de601";
 // "+stable.<build>.<sha>" bundle string — the backend applies trial/model
 // restrictions differently to unexpected client versions, which can cause
 // spurious "trial_blocked" (403) errors. Keep in sync with the running Zed.
-pub const ZED_VERSION = "1.8.2";
+pub const ZED_VERSION = "1.16.2";
 pub const ZED_VERSION_HEADER = "x-zed-version: " ++ ZED_VERSION;
 
 // Headers the genuine Zed client attaches to every /completions request. Trial
