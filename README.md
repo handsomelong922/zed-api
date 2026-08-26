@@ -60,6 +60,67 @@ zig build -Doptimize=ReleaseSafe
 
 `zig build` 会按当前 Mac 原生架构构建，Apple Silicon 和 Intel 均支持。管理页同样是 <http://127.0.0.1:8001>。
 
+### Linux / Docker
+
+GitHub Actions 会构建 Linux amd64 / arm64 二进制，并发布多架构镜像：
+
+```text
+ghcr.io/handsomelong922/zed-api:latest
+```
+
+#### Docker（推荐用于低配 VPS）
+
+项目固定监听 `127.0.0.1`。为了既保持这个安全默认值，又不增加额外 TCP 转发进程，Linux Docker 部署使用 host network：
+
+```sh
+mkdir -p data
+
+docker run -d \
+  --name zed-api \
+  --restart unless-stopped \
+  --memory=384m \
+  --network host \
+  -v "$PWD/data:/data" \
+  ghcr.io/handsomelong922/zed-api:latest
+```
+
+容器工作目录是 `/data`，`accounts.json` 和 `active_account.txt` 都会保存在挂载目录中，升级或重建容器不会丢账号。
+
+首次登录账号：
+
+```sh
+docker exec -it zed-api zed2api login my-account
+```
+
+服务仍然只监听宿主机：
+
+```text
+http://127.0.0.1:8001
+```
+
+因此不要用普通 `-p 8001:8001` 代替 `--network host`：应用在容器内部只监听 loopback，Docker bridge 模式下宿主机端口映射无法访问这个 listener。
+
+如果需要远程访问，请在宿主机前面增加带鉴权的 Nginx/Caddy、VPN、Tailscale 或 Cloudflare Tunnel。项目本身没有 API 鉴权，不要直接把 8001 裸露到公网。
+
+> GHCR 首次创建 package 时，如果 GitHub 将 package visibility 默认为 Private，需要在 GitHub Packages 的该镜像设置中把 Visibility 改成 Public 一次；之后云服务器就可以无需 `docker login` 直接 `docker pull`。
+
+#### Native Linux
+
+从 GitHub Release 下载与你架构匹配的：
+
+- `zed-api-linux-amd64.tar.gz`
+- `zed-api-linux-arm64.tar.gz`
+
+解压后运行：
+
+```sh
+chmod +x zed2api
+./zed2api login my-account
+./zed2api serve 8001
+```
+
+原生 Linux 同样只监听 `127.0.0.1:8001`，特别适合直接配合 systemd + 本机反向代理使用。
+
 Windows 健康检查：
 
 ```powershell
@@ -79,7 +140,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:8001/v1/models'
 
 ### Codex
 
-把 `configs/codex.config.toml.example` 合并进 Windows 的 `%USERPROFILE%\.codex\config.toml` 或 macOS 的 `~/.codex/config.toml`：
+把 `configs/codex.config.toml.example` 合并进 Windows 的 `%USERPROFILE%\.codex\config.toml` 或 macOS/Linux 的 `~/.codex/config.toml`：
 
 ```toml
 model_provider = "zed_local"
@@ -103,7 +164,7 @@ codex exec --skip-git-repo-check '请只回复：CODEX_OK'
 
 ### Claude Code
 
-按想用的模型挑一个模板，合并进 Windows 的 `%USERPROFILE%\.claude\settings.json` 或 macOS 的 `~/.claude/settings.json`：
+按想用的模型挑一个模板，合并进 Windows 的 `%USERPROFILE%\.claude\settings.json` 或 macOS/Linux 的 `~/.claude/settings.json`：
 
 - `configs/claude.settings.json.example` — Sonnet 5
 - `configs/claude-gpt56-sol / -terra / -luna` — GPT-5.6 变体
@@ -149,7 +210,14 @@ opencode run --model zed-local/gpt-5.6-terra --variant low "你的任务"
 ```sh
 cd webui && npm ci && npm run build && cd ..   # 前端产物内嵌进可执行文件
 zig build test                                  # 协议转换与流式回归测试
-zig build -Doptimize=ReleaseSafe                # Windows: zig-out\bin\zed2api.exe；macOS: zig-out/bin/zed2api
+zig build -Doptimize=ReleaseSafe                # 当前平台原生构建
+```
+
+Linux 交叉构建示例：
+
+```sh
+zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe
+zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
 ```
 
 改了前端记得重新 `zig build`，不然可执行文件里还是旧页面。
@@ -157,6 +225,7 @@ zig build -Doptimize=ReleaseSafe                # Windows: zig-out\bin\zed2api.e
 ## 已知限制
 
 - 服务本身无鉴权，默认只监听 `127.0.0.1`。想通过中转/反代分享给别人用的话，务必自己在前面加一层鉴权，否则等于把账号额度裸奔出去。
+- Docker 采用 Linux `--network host`，这是为了保持 loopback-only 监听且不增加额外代理进程；Docker Desktop 的 host network 行为与原生 Linux 不完全相同，本方案主要面向 Linux VPS。
 - 请求格式完全按 Zed 官方客户端实现，但上游随时可能改协议或触发风控，不保证持续可用。
 - `count_tokens` 是兼容桩，别拿来精确计费。
 - 有些 Zed 套餐不公开数值额度，管理页只能显示"未公开"，精确金额去 Zed 官网看。
