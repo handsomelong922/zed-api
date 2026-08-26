@@ -45,6 +45,12 @@ jobs:
           python3 tools/review_fix_committed_status.py green
           zig test src/stream.zig -lc
 
+      - name: Build embedded Web UI
+        run: |
+          cd webui
+          npm ci
+          npm run build
+
       - name: Full regression suite and Linux release builds
         run: |
           zig build test
