@@ -1,7 +1,7 @@
 FROM alpine:3.20 AS builder
 
 ARG ZIG_VERSION=0.15.2
-RUN apk add --no-cache ca-certificates curl xz
+RUN apk add --no-cache ca-certificates curl xz nodejs npm
 RUN set -eux; \
     case "$(uname -m)" in \
       x86_64) zig_arch="x86_64" ;; \
@@ -17,6 +17,7 @@ RUN set -eux; \
 WORKDIR /src
 COPY . .
 RUN zig build test
+RUN cd webui && npm ci && npm run build
 RUN zig build -Doptimize=ReleaseSafe
 
 FROM alpine:3.20 AS runtime
