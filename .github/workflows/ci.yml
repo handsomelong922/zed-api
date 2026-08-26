@@ -172,3 +172,46 @@ jobs:
 
           options_code="$(curl -sS -o /tmp/auth-options.txt -w '%{http_code}' -X OPTIONS http://127.0.0.1:18001/v1/messages)"
           test "$options_code" = "200"
+      - name: Verify runtime curl is available for streaming
+        run: |
+          docker run --rm --entrypoint sh zed-api:smoke -c 'command -v curl && curl --version'
+      - name: Verify web API key settings persist and apply immediately
+        run: |
+          rm -rf /tmp/zed-api-settings-smoke
+          mkdir -p /tmp/zed-api-settings-smoke
+          printf '%s\n' '{"accounts":{"smoke":{"user_id":"1","credential":{"access_token":"dummy"}}}}' > /tmp/zed-api-settings-smoke/accounts.json
+
+          docker run -d --name zed-api-settings -p 18001:8001 -v /tmp/zed-api-settings-smoke:/data zed-api:smoke
+          trap 'docker logs zed-api-settings 2>/dev/null || true; docker rm -f zed-api-settings >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18001/ >/tmp/settings-index.html; then break; fi
+            sleep 1
+          done
+
+          grep -q 'API Key 设置' /tmp/settings-index.html
+          grep -q '保存 API Key' /tmp/settings-index.html
+          status_json="$(curl -fsS http://127.0.0.1:18001/zed/settings/api-key)"
+          echo "$status_json" | grep -q '"enabled":false'
+
+          save_json="$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{"api_key":"web-secret"}' http://127.0.0.1:18001/zed/settings/api-key)"
+          echo "$save_json" | grep -q '"enabled":true'
+          echo "$save_json" | grep -q '"source":"file"'
+
+          missing_code="$(curl -sS -o /tmp/web-key-missing.json -w '%{http_code}' -X POST http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$missing_code" = "401"
+          good_code="$(curl -sS -o /tmp/web-key-good.json -w '%{http_code}' -X POST -H 'Authorization: Bearer web-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$good_code" = "200"
+
+          docker rm -f zed-api-settings >/dev/null
+          docker run -d --name zed-api-settings -p 18001:8001 -v /tmp/zed-api-settings-smoke:/data zed-api:smoke
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18001/ >/dev/null; then break; fi
+            sleep 1
+          done
+          persisted_code="$(curl -sS -o /tmp/web-key-persisted.json -w '%{http_code}' -X POST -H 'Authorization: Bearer web-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$persisted_code" = "200"
+
+          clear_json="$(curl -fsS -X DELETE http://127.0.0.1:18001/zed/settings/api-key)"
+          echo "$clear_json" | grep -q '"enabled":false'
+          open_again_code="$(curl -sS -o /tmp/web-key-open-again.json -w '%{http_code}' -X POST http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$open_again_code" = "200"
