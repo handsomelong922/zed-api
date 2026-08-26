@@ -31,6 +31,7 @@ RUN set -eux; \
 
 FROM alpine:3.20 AS runtime
 RUN apk add --no-cache openssl
+ENV ZED_API_HOST=0.0.0.0
 WORKDIR /data
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /src/zig-out/bin/zed2api /usr/local/bin/zed2api
@@ -38,9 +39,9 @@ COPY --from=builder /src/zig-out/bin/zed2api-setup /usr/local/bin/zed2api-setup
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-EXPOSE 8001 8002
+EXPOSE 8001
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:8001/v1/models >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:8001/v1/models >/dev/null || wget -qO- http://127.0.0.1:8001/login >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
