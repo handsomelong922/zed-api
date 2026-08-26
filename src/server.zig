@@ -208,8 +208,12 @@ fn route(method: []const u8, path: []const u8, body: []const u8) !Response {
         return try handleProxy(body, .anthropic);
     if (std.mem.eql(u8, path, "/zed/login") and std.mem.eql(u8, method, "POST"))
         return try handleLogin(body);
+    if (std.mem.eql(u8, path, "/zed/login/complete") and std.mem.eql(u8, method, "POST"))
+        return try handleLoginComplete(body);
+    if (std.mem.eql(u8, path, "/zed/login/cancel") and std.mem.eql(u8, method, "POST"))
+        return handleLoginCancel();
     if (std.mem.eql(u8, path, "/zed/login/status") and std.mem.eql(u8, method, "GET"))
-        return handleLoginStatus();
+        return try handleLoginStatus();
     if (std.mem.eql(u8, method, "OPTIONS"))
         return .{ .status = 200, .body = "" };
     return .{ .status = 404, .body = "{\"error\":\"not found\"}" };
@@ -496,7 +500,7 @@ fn handleAccountHealth(body: []const u8) !Response {
             runAccountHealthProbe(acc);
             break;
         }
-        if (!found) return .{ .status = 404, .body = "{\"error\":\"account not found\"}" };
+        if (!found) return .{ .status = 404, .body = "{\"error\":\"account not found\" }" };
     } else {
         // Sequential checks keep resource use predictable and avoid sending a
         // burst of paid model requests when many accounts are configured.
@@ -666,103 +670,158 @@ fn convertZedModelsToOpenAI(allocator: std.mem.Allocator, raw: []const u8) ![]co
 }
 
 // ── Login ──
-var login_status: enum { idle, waiting, success, failed } = .idle;
-var login_error_msg: []const u8 = "";
-var login_result_name: []const u8 = "";
+const LoginStatus = enum { idle, waiting, success, failed };
+
+const PendingLogin = struct {
+    keypair: auth.RsaKeyPair,
+    login_url: []const u8,
+    account_name: []const u8,
+    port: u16,
+};
+
+var login_status: LoginStatus = .idle;
+var login_mutex: std.Thread.Mutex = .{};
+var pending_login: ?*PendingLogin = null;
+
+fn loginStateResponse(pending: *const PendingLogin) !Response {
+    const body = try std.fmt.allocPrint(global_allocator,
+        "{{\"status\":\"waiting\",\"login_url\":\"{s}\",\"port\":{d}}}",
+        .{ pending.login_url, pending.port },
+    );
+    return .{ .status = 200, .body = body, .allocated = true };
+}
+
+fn clearPendingLoginLocked() void {
+    if (pending_login) |pending| {
+        pending.keypair.deinit();
+        global_allocator.free(pending.login_url);
+        if (pending.account_name.len > 0) global_allocator.free(pending.account_name);
+        global_allocator.destroy(pending);
+        pending_login = null;
+    }
+}
 
 fn handleLogin(body: []const u8) !Response {
-    if (login_status == .waiting) return .{ .status = 409, .body = "{\"error\":\"login already in progress\"}" };
+    login_mutex.lock();
+    defer login_mutex.unlock();
+
+    // Refreshing the page or clicking Add again must not invalidate a callback
+    // that the user already obtained. Reuse the same RSA login session until it
+    // is completed or explicitly cancelled.
+    if (pending_login) |pending| return try loginStateResponse(pending);
 
     var account_name: []const u8 = "";
     if (body.len > 0) {
         const parsed = std.json.parseFromSlice(std.json.Value, global_allocator, body, .{}) catch null;
         if (parsed) |p| {
             defer p.deinit();
-            if (p.value.object.get("name")) |n| {
-                if (n == .string) account_name = global_allocator.dupe(u8, n.string) catch "";
+            if (p.value == .object) {
+                if (p.value.object.get("name")) |n| {
+                    if (n == .string and n.string.len > 0)
+                        account_name = try global_allocator.dupe(u8, n.string);
+                }
             }
         }
     }
+    errdefer if (account_name.len > 0) global_allocator.free(account_name);
 
-    const keypair = try global_allocator.create(auth.RsaKeyPair);
-    keypair.* = auth.RsaKeyPair.generate(global_allocator) catch |err| {
-        global_allocator.destroy(keypair);
-        return err;
-    };
-    const pub_key = keypair.exportPublicKeyB64(global_allocator) catch |err| {
-        keypair.deinit();
-        global_allocator.destroy(keypair);
-        return err;
-    };
+    const pending = try global_allocator.create(PendingLogin);
+    errdefer global_allocator.destroy(pending);
+    pending.keypair = try auth.RsaKeyPair.generate(global_allocator);
+    errdefer pending.keypair.deinit();
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
-    const tcp = try global_allocator.create(std.net.Server);
-    tcp.* = addr.listen(.{}) catch |err| {
-        global_allocator.free(pub_key);
-        keypair.deinit();
-        global_allocator.destroy(keypair);
-        global_allocator.destroy(tcp);
-        return err;
-    };
-    const port = tcp.listen_address.getPort();
-    const url = try std.fmt.allocPrint(global_allocator, "https://zed.dev/native_app_signin?native_app_port={d}&native_app_public_key={s}", .{ port, pub_key });
+    const pub_key = try pending.keypair.exportPublicKeyB64(global_allocator);
+    defer global_allocator.free(pub_key);
 
+    // Zed requires a localhost port in the native-app callback URL. For a
+    // remote Web UI we only need a currently free port number; no listener is
+    // kept open on the VM. The user's local browser will fail to open it, and
+    // the resulting URL is pasted back into /zed/login/complete.
+    const callback_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    var callback_probe = try callback_addr.listen(.{});
+    const callback_port = callback_probe.listen_address.getPort();
+    callback_probe.deinit();
+
+    const login_url = try std.fmt.allocPrint(global_allocator,
+        "https://zed.dev/native_app_signin?native_app_port={d}&native_app_public_key={s}",
+        .{ callback_port, pub_key },
+    );
+    errdefer global_allocator.free(login_url);
+
+    pending.login_url = login_url;
+    pending.account_name = account_name;
+    pending.port = callback_port;
+
+    // Build the response before publishing the pending pointer so an OOM does
+    // not leave a half-started session behind.
+    const response = try loginStateResponse(pending);
+    pending_login = pending;
     login_status = .waiting;
-    const thread = std.Thread.spawn(.{}, loginWorker, .{ keypair, tcp, pub_key, account_name }) catch {
-        login_status = .failed;
-        tcp.deinit();
-        global_allocator.destroy(tcp);
-        keypair.deinit();
-        global_allocator.destroy(keypair);
-        global_allocator.free(pub_key);
-        global_allocator.free(url);
-        return .{ .status = 500, .body = "{\"error\":\"thread spawn failed\"}" };
-    };
-    thread.detach();
-    auth.openBrowserPublic(url);
-
-    var resp_buf: [4096]u8 = undefined;
-    const resp = try std.fmt.bufPrint(&resp_buf, "{{\"login_url\":\"{s}\",\"port\":{d}}}", .{ url, port });
-    const result = try global_allocator.dupe(u8, resp);
-    global_allocator.free(url);
-    return .{ .status = 200, .body = result, .allocated = true };
+    std.debug.print("[login] remote OAuth ready; complete it from the Web UI (callback port {d})\n", .{callback_port});
+    return response;
 }
 
-fn loginWorker(keypair: *auth.RsaKeyPair, tcp: *std.net.Server, pub_key: []const u8, account_name: []const u8) void {
-    defer {
-        tcp.deinit();
-        global_allocator.destroy(tcp);
-        keypair.deinit();
-        global_allocator.destroy(keypair);
-        global_allocator.free(pub_key);
-        if (account_name.len > 0) global_allocator.free(account_name);
-    }
-    const creds = auth.loginWithServer(global_allocator, keypair, tcp) catch |err| {
-        login_status = .failed;
-        login_error_msg = @errorName(err);
-        return;
+fn handleLoginComplete(body: []const u8) !Response {
+    login_mutex.lock();
+    defer login_mutex.unlock();
+
+    const pending = pending_login orelse
+        return .{ .status = 409, .body = "{\"error\":\"no login in progress\"}" };
+
+    const parsed = std.json.parseFromSlice(std.json.Value, global_allocator, body, .{}) catch
+        return .{ .status = 400, .body = "{\"error\":\"invalid json\"}" };
+    defer parsed.deinit();
+    if (parsed.value != .object)
+        return .{ .status = 400, .body = "{\"error\":\"request body must be an object\"}" };
+    const callback_value = parsed.value.object.get("callback_url") orelse
+        return .{ .status = 400, .body = "{\"error\":\"missing callback_url\"}" };
+    if (callback_value != .string or callback_value.string.len == 0)
+        return .{ .status = 400, .body = "{\"error\":\"callback_url must be a string\"}" };
+
+    const creds = credentialsFromCallbackUrl(global_allocator, &pending.keypair, callback_value.string) catch |err| {
+        const error_body = try std.fmt.allocPrint(global_allocator,
+            "{{\"error\":\"callback parse/decrypt failed: {s}\"}}",
+            .{@errorName(err)},
+        );
+        return .{ .status = 400, .body = error_body, .allocated = true };
     };
     defer global_allocator.free(creds.user_id);
     defer global_allocator.free(creds.access_token);
 
-    const name = if (account_name.len > 0) account_name else creds.user_id;
+    const name = if (pending.account_name.len > 0) pending.account_name else creds.user_id;
     accounts.addAccount(global_allocator, name, creds.user_id, creds.access_token) catch |err| {
-        login_status = .failed;
-        login_error_msg = @errorName(err);
-        return;
+        const error_body = try std.fmt.allocPrint(global_allocator,
+            "{{\"error\":\"save account failed: {s}\"}}",
+            .{@errorName(err)},
+        );
+        return .{ .status = 500, .body = error_body, .allocated = true };
     };
+
     account_mgr.deinit();
     account_mgr = accounts.AccountManager.init(global_allocator);
     account_mgr.loadFromFile() catch {};
-    // A freshly logged-in account is the one the user wants to use, so make it
-    // active (and persist it) instead of keeping whatever was restored on load.
     _ = account_mgr.switchTo(name);
-    login_result_name = global_allocator.dupe(u8, name) catch "";
+    std.debug.print("[login] remote OAuth success: {s}\n", .{name});
+
+    clearPendingLoginLocked();
     login_status = .success;
-    std.debug.print("[login] success: {s}\n", .{name});
+    return .{ .status = 200, .body = "{\"status\":\"success\"}" };
 }
 
-fn handleLoginStatus() Response {
+fn handleLoginCancel() Response {
+    login_mutex.lock();
+    defer login_mutex.unlock();
+    clearPendingLoginLocked();
+    login_status = .idle;
+    return .{ .status = 200, .body = "{\"status\":\"idle\"}" };
+}
+
+fn handleLoginStatus() !Response {
+    login_mutex.lock();
+    defer login_mutex.unlock();
+
+    if (pending_login) |pending| return try loginStateResponse(pending);
+
     return switch (login_status) {
         .idle => .{ .status = 200, .body = "{\"status\":\"idle\"}" },
         .waiting => .{ .status = 200, .body = "{\"status\":\"waiting\"}" },
@@ -775,4 +834,74 @@ fn handleLoginStatus() Response {
             break :blk .{ .status = 200, .body = "{\"status\":\"failed\"}" };
         },
     };
+}
+
+fn credentialsFromCallbackUrl(
+    allocator: std.mem.Allocator,
+    keypair: *auth.RsaKeyPair,
+    callback_url: []const u8,
+) !auth.Credentials {
+    const query_start = std.mem.indexOfScalar(u8, callback_url, '?') orelse return error.BadCallback;
+    const query = callback_url[query_start + 1 ..];
+
+    const uid_encoded = queryValue(query, "user_id") orelse return error.NoUserId;
+    const token_encoded = queryValue(query, "access_token") orelse return error.NoToken;
+    const uid = try urlDecode(allocator, uid_encoded);
+    errdefer allocator.free(uid);
+    const encrypted_token = try urlDecode(allocator, token_encoded);
+    defer allocator.free(encrypted_token);
+
+    var padded_buf: [4096]u8 = undefined;
+    const pad_needed = (4 - (encrypted_token.len % 4)) % 4;
+    if (encrypted_token.len + pad_needed > padded_buf.len) return error.TokenTooLong;
+    @memcpy(padded_buf[0..encrypted_token.len], encrypted_token);
+    for (0..pad_needed) |i| padded_buf[encrypted_token.len + i] = '=';
+    const padded = padded_buf[0 .. encrypted_token.len + pad_needed];
+
+    const decoder = std.base64.url_safe.Decoder;
+    const decoded_len = decoder.calcSizeForSlice(padded) catch return error.BadBase64;
+    const ciphertext = try allocator.alloc(u8, decoded_len);
+    defer allocator.free(ciphertext);
+    decoder.decode(ciphertext, padded) catch return error.BadBase64;
+
+    const plaintext = try keypair.decrypt(allocator, ciphertext);
+    return .{ .user_id = uid, .access_token = plaintext };
+}
+
+fn queryValue(query: []const u8, key: []const u8) ?[]const u8 {
+    var fields = std.mem.splitScalar(u8, query, '&');
+    while (fields.next()) |field| {
+        const eq = std.mem.indexOfScalar(u8, field, '=') orelse continue;
+        if (std.mem.eql(u8, field[0..eq], key)) return field[eq + 1 ..];
+    }
+    return null;
+}
+
+fn urlDecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+    const writer = out.writer(allocator);
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '%' and i + 2 < input.len) {
+            const hi = hexVal(input[i + 1]) orelse return error.BadEncoding;
+            const lo = hexVal(input[i + 2]) orelse return error.BadEncoding;
+            try writer.writeByte((hi << 4) | lo);
+            i += 3;
+        } else if (input[i] == '+') {
+            try writer.writeByte(' ');
+            i += 1;
+        } else {
+            try writer.writeByte(input[i]);
+            i += 1;
+        }
+    }
+    return try allocator.dupe(u8, out.items);
+}
+
+fn hexVal(c: u8) ?u8 {
+    if (c >= '0' and c <= '9') return c - '0';
+    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
+    return null;
 }
