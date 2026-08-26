@@ -172,3 +172,66 @@ jobs:
 
           options_code="$(curl -sS -o /tmp/auth-options.txt -w '%{http_code}' -X OPTIONS http://127.0.0.1:18001/v1/messages)"
           test "$options_code" = "200"
+      - name: Verify runtime curl is available for streaming
+        run: |
+          docker run --rm --entrypoint sh zed-api:smoke -c 'command -v curl && curl --version'
+      - name: Verify web API key settings persist and require current key for mutation
+        run: |
+          rm -rf /tmp/zed-api-settings-smoke
+          mkdir -p /tmp/zed-api-settings-smoke
+          printf '%s\n' '{"accounts":{"smoke":{"user_id":"1","credential":{"access_token":"dummy"}}}}' > /tmp/zed-api-settings-smoke/accounts.json
+
+          docker run -d --name zed-api-settings -p 18001:8001 -v /tmp/zed-api-settings-smoke:/data zed-api:smoke
+          trap 'docker logs zed-api-settings 2>/dev/null || true; docker rm -f zed-api-settings >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18001/ >/tmp/settings-index.html; then break; fi
+            sleep 1
+          done
+
+          grep -q 'API Key 设置' /tmp/settings-index.html
+          grep -q '保存 API Key' /tmp/settings-index.html
+          status_json="$(curl -fsS http://127.0.0.1:18001/zed/settings/api-key)"
+          echo "$status_json" | grep -q '"enabled":false'
+
+          # First-time setup remains usable without a current key.
+          save_json="$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{"api_key":"web-secret"}' http://127.0.0.1:18001/zed/settings/api-key)"
+          echo "$save_json" | grep -q '"enabled":true'
+          echo "$save_json" | grep -q '"source":"file"'
+
+          missing_code="$(curl -sS -o /tmp/web-key-missing.json -w '%{http_code}' -X POST http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$missing_code" = "401"
+          good_code="$(curl -sS -o /tmp/web-key-good.json -w '%{http_code}' -X POST -H 'Authorization: Bearer web-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$good_code" = "200"
+
+          # Once a key exists, changing it without the current key must fail.
+          rotate_missing_code="$(curl -sS -o /tmp/key-rotate-missing.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"api_key":"new-secret"}' http://127.0.0.1:18001/zed/settings/api-key)"
+          test "$rotate_missing_code" = "401"
+          rotate_wrong_code="$(curl -sS -o /tmp/key-rotate-wrong.json -w '%{http_code}' -X POST -H 'Authorization: Bearer wrong-secret' -H 'Content-Type: application/json' -d '{"api_key":"new-secret"}' http://127.0.0.1:18001/zed/settings/api-key)"
+          test "$rotate_wrong_code" = "401"
+          rotate_json="$(curl -fsS -X POST -H 'Authorization: Bearer web-secret' -H 'Content-Type: application/json' -d '{"api_key":"new-secret"}' http://127.0.0.1:18001/zed/settings/api-key)"
+          echo "$rotate_json" | grep -q '"enabled":true'
+          echo "$rotate_json" | grep -q '"source":"file"'
+
+          old_code="$(curl -sS -o /tmp/web-key-old.json -w '%{http_code}' -X POST -H 'Authorization: Bearer web-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$old_code" = "401"
+          new_code="$(curl -sS -o /tmp/web-key-new.json -w '%{http_code}' -X POST -H 'Authorization: Bearer new-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$new_code" = "200"
+
+          docker rm -f zed-api-settings >/dev/null
+          docker run -d --name zed-api-settings -p 18001:8001 -v /tmp/zed-api-settings-smoke:/data zed-api:smoke
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18001/ >/dev/null; then break; fi
+            sleep 1
+          done
+          persisted_code="$(curl -sS -o /tmp/web-key-persisted.json -w '%{http_code}' -X POST -H 'Authorization: Bearer new-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$persisted_code" = "200"
+
+          # Clearing an existing key has the same current-key requirement.
+          clear_missing_code="$(curl -sS -o /tmp/key-clear-missing.json -w '%{http_code}' -X DELETE http://127.0.0.1:18001/zed/settings/api-key)"
+          test "$clear_missing_code" = "401"
+          clear_wrong_code="$(curl -sS -o /tmp/key-clear-wrong.json -w '%{http_code}' -X DELETE -H 'Authorization: Bearer wrong-secret' http://127.0.0.1:18001/zed/settings/api-key)"
+          test "$clear_wrong_code" = "401"
+          clear_json="$(curl -fsS -X DELETE -H 'Authorization: Bearer new-secret' http://127.0.0.1:18001/zed/settings/api-key)"
+          echo "$clear_json" | grep -q '"enabled":false'
+          open_again_code="$(curl -sS -o /tmp/web-key-open-again.json -w '%{http_code}' -X POST http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$open_again_code" = "200"

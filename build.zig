@@ -57,8 +57,8 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run zed2api server");
     run_step.dependOn(&run_cmd.step);
 
-    // Keep protocol conversion, streaming behavior, and remote setup parsing
-    // executable through the standard `zig build test` command.
+    // Keep protocol conversion, streaming behavior, settings, and remote setup
+    // parsing executable through the standard `zig build test` command.
     const providers_test_mod = b.createModule(.{
         .root_source_file = b.path("src/providers.zig"),
         .target = target,
@@ -83,6 +83,15 @@ pub fn build(b: *std.Build) void {
     }
     const run_stream_tests = b.addRunArtifact(stream_tests);
 
+    const settings_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/settings.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const settings_tests = b.addTest(.{ .root_module = settings_test_mod });
+    const run_settings_tests = b.addRunArtifact(settings_tests);
+
     const setup_test_mod = b.createModule(.{
         .root_source_file = b.path("src/headless_login.zig"),
         .target = target,
@@ -98,8 +107,9 @@ pub fn build(b: *std.Build) void {
     }
     const run_setup_tests = b.addRunArtifact(setup_tests);
 
-    const test_step = b.step("test", "Run protocol, streaming, and setup regression tests");
+    const test_step = b.step("test", "Run protocol, streaming, settings, and setup regression tests");
     test_step.dependOn(&run_providers_tests.step);
     test_step.dependOn(&run_stream_tests.step);
+    test_step.dependOn(&run_settings_tests.step);
     test_step.dependOn(&run_setup_tests.step);
 }

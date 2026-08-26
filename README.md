@@ -23,6 +23,7 @@ Codex 桌面端（5.6 Sol，极高档位）：
 - **OpenCode**：`/v1/chat/completions`，切模型、切思考档位最方便。
 - **多账号**：健康账号优先，认证失败、限流、网络错误分别冷却，挂了自动换号，换完记住。
 - **管理页**：每个账号的套餐、到期时间、额度、模型探测结果一目了然，可以单个或全部做健康检查。
+- **Web API Key**：管理页可直接设置全局模型 API 密钥，立即生效并持久化到 `/data/settings.json`。
 
 ## 模型与思考档位
 
@@ -88,15 +89,19 @@ http://服务器IP:34567
 /data
 ```
 
-`accounts.json` 和 `active_account.txt` 都会保存在 `/data`，升级或重建容器不会丢账号。
+`accounts.json`、`active_account.txt` 和网页保存的 `settings.json` 都会保存在 `/data`，升级或重建容器不会丢账号或网页 API Key。
 
-如果端口会暴露到公网，建议在 1Panel 的容器环境变量中设置一把全局 API Key：
+如果端口会暴露到公网，建议启用全局 API Key。最方便的方式是进入管理页的 **“API Key 设置”**，输入新 Key 后保存；保存会立即生效并写入 `/data/settings.json`。第一次还没有任何 Key 时可以直接保存；已有 Key 后，修改或清除必须输入当前 Key 验证身份。设置接口不会回显密钥，网页也不会把密钥写入 localStorage/sessionStorage。
+
+也可以在 1Panel 的容器环境变量中设置后备 Key：
 
 ```text
 ZED_API_KEY=你自己设置的密钥
 ```
 
-设置后，`/v1/*` 与 `/api/event_logging/batch` 必须携带这把密钥。OpenAI 风格客户端使用 `Authorization: Bearer <ZED_API_KEY>`；Anthropic 风格客户端也可以使用 `x-api-key: <ZED_API_KEY>`。如果不设置或设置为空，则保持原来的无鉴权行为。Web 管理页、账号管理和登录流程不受这个变量影响。
+优先级是：**网页保存的 `/data/settings.json` > `ZED_API_KEY` 环境变量 > 无鉴权**。清除网页 Key 后，如果仍存在 `ZED_API_KEY`，服务会自动回退到环境变量 Key。
+
+启用后，`/v1/*` 与 `/api/event_logging/batch` 必须携带有效密钥。OpenAI 风格客户端使用 `Authorization: Bearer <key>`；Anthropic 风格客户端也可以使用 `x-api-key: <key>`。Web 管理页、账号管理和登录流程仍保持可访问；API Key 不是整个管理页的登录密码，公网管理页仍建议配合 HTTPS、防火墙、安全组或反向代理认证。
 
 **首次没有账号时**，使用同一个自定义端口访问：
 
@@ -132,7 +137,7 @@ docker run -d \
 
 > GHCR 首次创建 package 时，如果 GitHub 将 package visibility 默认为 Private，需要在 GitHub Packages 的该镜像设置中把 Visibility 改成 Public 一次；之后云服务器就可以无需 `docker login` 直接 `docker pull`。
 
-> `ZED_API_KEY` 是可选的；公网部署建议务必设置，并使用足够长、不可猜测的随机值。服务不会在日志或 API 响应中输出这把密钥。
+> 公网部署建议务必启用 API Key，并使用足够长、不可猜测的随机值。服务不会在日志或设置状态 API 中输出这把密钥。
 
 #### Native Linux
 
@@ -168,7 +173,7 @@ Windows 健康检查：
 Invoke-RestMethod -Uri 'http://127.0.0.1:8001/v1/models'
 ```
 
-如果启用了 `ZED_API_KEY`，客户端的 API Key 字段直接填写同一个值即可；客户端需要最终发送 `Authorization: Bearer <key>` 或 `x-api-key: <key>`。
+如果启用了全局 API Key，客户端的 API Key 字段填写当前**有效 Key**即可；客户端需要最终发送 `Authorization: Bearer <key>` 或 `x-api-key: <key>`。
 
 ### Codex
 
@@ -215,17 +220,20 @@ claude -p '请只回复：CLAUDE_OK'
 opencode run --model zed-local/gpt-5.6-terra --variant low "你的任务"
 ```
 
-未设置 `ZED_API_KEY` 时 `apiKey` 可以继续填 `dummy`；如果设置了 `ZED_API_KEY`，这里应填写同一个值。
+未启用 API Key 时 `apiKey` 可以继续填 `dummy`；启用后应填写当前有效 Key。
 
 ## API
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
-| POST | `/v1/responses` | OpenAI Responses |
-| POST | `/v1/chat/completions` | OpenAI Chat Completions |
-| POST | `/v1/messages` | Anthropic Messages |
+| POST | `/v1/responses` | OpenAI Responses（支持 `stream:true`） |
+| POST | `/v1/chat/completions` | OpenAI Chat Completions（支持 `stream:true`） |
+| POST | `/v1/messages` | Anthropic Messages（支持 `stream:true`） |
 | POST | `/v1/messages/count_tokens` | Claude Code 启动用的兼容桩 |
 | GET | `/v1/models` | 模型列表（双格式） |
+| GET | `/zed/settings/api-key` | 查询 API Key 是否启用及来源，不返回密钥 |
+| POST | `/zed/settings/api-key` | 保存/轮换网页 API Key；已有 Key 时需验证当前 Key |
+| DELETE | `/zed/settings/api-key` | 清除网页 API Key；已有 Key 时需验证当前 Key |
 | GET | `/zed/accounts` | 账号与调度状态（脱敏） |
 | GET | `/zed/accounts/status` | 全账号令牌/套餐/额度检查 |
 | POST | `/zed/accounts/health` | 单账号或全账号模型探测 |
@@ -233,8 +241,9 @@ opencode run --model zed-local/gpt-5.6-terra --variant low "你的任务"
 | GET | `/zed/usage` | 当前账号用量 |
 | GET | `/zed/billing` | 当前账号账单 |
 | GET | `/login` | Docker / 1Panel 首次账号初始化 |
-| POST | `/zed/login` | 本机管理页发起 GitHub OAuth 登录 |
-| GET | `/zed/login/status` | 查询本机登录状态 |
+| POST | `/zed/login` | 管理页发起本地浏览器 GitHub / Zed OAuth 登录 |
+| POST | `/zed/login/complete` | 粘贴本地浏览器回调 URL 完成远程账号导入 |
+| GET | `/zed/login/status` | 查询登录状态 |
 
 ## 构建
 
@@ -257,7 +266,8 @@ zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
 
 ## 已知限制
 
-- `ZED_API_KEY` 未设置或为空时，模型 API 保持无鉴权；公网部署建议设置该环境变量，并仍配合 HTTPS、防火墙或安全组使用。
+- 没有网页 Key 且 `ZED_API_KEY` 未设置/为空时，模型 API 保持无鉴权；公网部署建议启用 API Key，并仍配合 HTTPS、防火墙或安全组使用。
+- API Key 保护模型 API 以及已有 Key 后的 Key 修改/清除操作，但不是整个 Web 管理页的管理员登录机制。
 - Docker 镜像对普通 bridge 端口映射做了单端口适配；1Panel 只需映射容器 `8001`。
 - 请求格式完全按 Zed 官方客户端实现，但上游随时可能改协议或触发风控，不保证持续可用。
 - `count_tokens` 是兼容桩，别拿来精确计费。

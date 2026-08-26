@@ -34,10 +34,16 @@ pub fn send(stream: std.net.Stream, data: []const u8) !void {
                     else => error.Unexpected,
                 };
             }
+            if (rc == 0) return error.BrokenPipe;
             sent += @intCast(rc);
         }
     } else {
-        _ = try stream.write(data);
+        var sent: usize = 0;
+        while (sent < data.len) {
+            const n = try stream.write(data[sent..]);
+            if (n == 0) return error.BrokenPipe;
+            sent += n;
+        }
     }
 }
 
@@ -57,7 +63,7 @@ pub fn writeResponseWithType(stream: std.net.Stream, status: u16, body: []const 
         else => "Unknown",
     };
     var header_buf: [1024]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\n\r\n", .{ status, status_text, content_type, body.len }) catch return;
+    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nConnection: close\r\n\r\n", .{ status, status_text, content_type, body.len }) catch return;
     send(stream, header) catch {};
     send(stream, body) catch {};
 }

@@ -4,12 +4,14 @@ import { renderAccounts } from './pages/accounts'
 import { renderEndpoints } from './pages/endpoints'
 import { renderHealth } from './pages/health'
 import { renderIntegration } from './pages/integration'
+import { renderSecurity } from './pages/security'
 
-type PageId = 'accounts' | 'health' | 'endpoints' | 'integration'
+type PageId = 'accounts' | 'health' | 'security' | 'endpoints' | 'integration'
 
 const PAGE_TITLES: Record<PageId, string> = {
   accounts: '账号中心',
   health: '服务检查',
+  security: 'API Key 设置',
   endpoints: '接口清单',
   integration: '客户端接入',
 }
@@ -35,7 +37,7 @@ app.innerHTML = `
         </div>
         <div class="service-overview-meta">
           <span>127.0.0.1:${port}</span>
-          <span id="model-count">-- 个模型</span>
+          <span id="model-count">--</span>
         </div>
       </div>
 
@@ -50,6 +52,10 @@ app.innerHTML = `
           <button class="nav-item" data-page="health" type="button">
             <span class="nav-icon">${icons.activity}</span>
             <span>服务检查</span>
+          </button>
+          <button class="nav-item" data-page="security" type="button">
+            <span class="nav-icon">${icons.shield}</span>
+            <span>API Key 设置</span>
           </button>
         </section>
 
@@ -68,7 +74,7 @@ app.innerHTML = `
 
       <footer class="side-footer">
         <div>${icons.shield}</div>
-        <p><strong>仅监听本机地址</strong><span>账号凭据不会发送到前端页面</span></p>
+        <p><strong>账号凭据仅保存在服务端</strong><span>API Key 设置不会回显已保存密钥</span></p>
       </footer>
     </aside>
 
@@ -87,6 +93,7 @@ app.innerHTML = `
       <main class="page-stage">
         <section class="page active" id="page-accounts"></section>
         <section class="page" id="page-health"></section>
+        <section class="page" id="page-security"></section>
         <section class="page" id="page-endpoints"></section>
         <section class="page" id="page-integration"></section>
       </main>
@@ -149,21 +156,22 @@ async function refreshServiceState() {
   label.textContent = '正在检查服务'
 
   try {
-    const response = await fetch('/v1/models', { cache: 'no-store' })
+    const response = await fetch('/zed/settings/api-key', { cache: 'no-store' })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const data = await response.json() as { data?: unknown[] }
+    const data = await response.json() as { enabled?: boolean; source?: string }
     dot.className = 'live-dot online'
-    label.textContent = '本地服务运行中'
-    count.textContent = `${data.data?.length ?? 0} 个模型`
+    label.textContent = '服务运行中'
+    count.textContent = data.enabled ? 'API Key 已启用' : 'API Key 未启用'
   } catch {
     dot.className = 'live-dot offline'
-    label.textContent = '本地服务未响应'
+    label.textContent = '服务未响应'
     count.textContent = '连接失败'
   }
 }
 
 renderAccounts()
 renderHealth()
+renderSecurity()
 renderEndpoints()
 renderIntegration()
 
