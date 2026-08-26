@@ -113,9 +113,13 @@ jobs:
           docker run -d --name zed-api-oauth-smoke -p 18001:8001 -v /tmp/zed-api-oauth-smoke:/data zed-api:smoke
           trap 'docker logs zed-api-oauth-smoke || true; docker rm -f zed-api-oauth-smoke >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 20); do
-            curl -fsS http://127.0.0.1:18001/ >/dev/null && break
+            if curl -fsS http://127.0.0.1:18001/ >/tmp/oauth-index.html; then
+              break
+            fi
             sleep 1
           done
+          grep -q 'login-callback-url' /tmp/oauth-index.html
+          grep -q '完成添加账号' /tmp/oauth-index.html
 
           start_json="$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:18001/zed/login)"
           echo "$start_json" | grep -q '"login_url":"https://zed.dev/native_app_signin'
