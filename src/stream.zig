@@ -399,7 +399,7 @@ fn doStreamProxy(client_stream: std.net.Stream, acc: *accounts.Account, body: []
                         else
                             .transient;
                         std.debug.print("[stream] upstream completion failed: code={s} message={s}\n", .{ control.code orelse "unknown", control.message orelse "unknown" });
-                        return .{ .ok = false, .kind = mapped_kind, .status = mapped_status };
+                        return completionFailureResult(headers_sent, mapped_kind, mapped_status);
                     },
                     .stream_ended => {
                         line_len = 0;
@@ -1043,4 +1043,17 @@ test "Responses stream bridges Zed stream_ended only after real events" {
     try std.testing.expect(!shouldSendResponsesDone(true, false, false));
     try std.testing.expect(!shouldSendResponsesDone(true, true, true));
     try std.testing.expect(!shouldSendResponsesDone(false, true, false));
+}
+
+fn completionFailureResult(headers_sent: bool, kind: accounts.FailureKind, status: u16) StreamResult {
+    return .{ .ok = false, .committed = headers_sent, .kind = kind, .status = status };
+}
+
+test "completion status failure preserves downstream commit state" {
+    const before_headers = completionFailureResult(false, .transient, 502);
+    try std.testing.expect(!before_headers.committed);
+    const after_headers = completionFailureResult(true, .rate_limit, 429);
+    try std.testing.expect(after_headers.committed);
+    try std.testing.expectEqual(accounts.FailureKind.rate_limit, after_headers.kind);
+    try std.testing.expectEqual(@as(u16, 429), after_headers.status);
 }
