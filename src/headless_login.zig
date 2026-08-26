@@ -3,6 +3,7 @@ const auth = @import("auth.zig");
 const accounts = @import("accounts.zig");
 
 const MAX_REQUEST = 32 * 1024;
+const DEFAULT_PORT: u16 = 8001;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -12,8 +13,8 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
     _ = args.skip();
-    const port_str = args.next() orelse "8002";
-    const port = std.fmt.parseInt(u16, port_str, 10) catch 8002;
+    const port_str = args.next() orelse "8001";
+    const port = std.fmt.parseInt(u16, port_str, 10) catch DEFAULT_PORT;
 
     var keypair = try auth.RsaKeyPair.generate(allocator);
     defer keypair.deinit();
@@ -30,18 +31,18 @@ pub fn main() !void {
     var server = try addr.listen(.{ .reuse_address = false });
     defer server.deinit();
 
-    std.debug.print("[setup] browser setup page listening on 0.0.0.0:{d}\n", .{port});
+    std.debug.print("[setup] browser login page: http://0.0.0.0:{d}/login\n", .{port});
 
     while (true) {
         const conn = server.accept() catch continue;
-        const completed = handleConnection(allocator, conn.stream, &keypair, login_url) catch |err| {
+        const completed = handleConnection(allocator, conn.stream, &keypair, login_url, port) catch |err| {
             std.debug.print("[setup] request failed: {}\n", .{err});
             conn.stream.close();
             continue;
         };
         conn.stream.close();
         if (completed) {
-            std.debug.print("[setup] account saved; setup server exiting\n", .{});
+            std.debug.print("[setup] account saved; switching to main API\n", .{});
             return;
         }
     }
@@ -52,6 +53,7 @@ fn handleConnection(
     stream: std.net.Stream,
     keypair: *auth.RsaKeyPair,
     login_url: []const u8,
+    port: u16,
 ) !bool {
     var buf: [MAX_REQUEST]u8 = undefined;
     var total: usize = 0;
@@ -70,20 +72,21 @@ fn handleConnection(
     const request_line = data[0..line_end];
     var parts = std.mem.splitScalar(u8, request_line, ' ');
     const method = parts.next() orelse return error.BadRequest;
-    const path = parts.next() orelse return error.BadRequest;
+    const full_path = parts.next() orelse return error.BadRequest;
+    const path = if (std.mem.indexOfScalar(u8, full_path, '?')) |idx| full_path[0..idx] else full_path;
 
-    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/")) {
-        const page = try renderPage(allocator, login_url, null);
+    if (std.mem.eql(u8, method, "GET") and isLoginPath(path)) {
+        const page = try renderPage(allocator, login_url, port, null);
         defer allocator.free(page);
         try sendHtml(stream, 200, page);
         return false;
     }
 
-    if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/complete")) {
+    if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/login/complete")) {
         const header_end = std.mem.indexOf(u8, data, "\r\n\r\n") orelse return error.BadRequest;
         const body = data[header_end + 4 ..];
         const encoded = formValue(body, "callback_url") orelse {
-            const page = try renderPage(allocator, login_url, "没有收到回调地址，请重新复制浏览器地址栏中的完整 URL。");
+            const page = try renderPage(allocator, login_url, port, "没有收到回调地址，请重新复制浏览器地址栏中的完整 URL。");
             defer allocator.free(page);
             try sendHtml(stream, 400, page);
             return false;
@@ -94,7 +97,7 @@ fn handleConnection(
         const creds = credentialsFromCallbackUrl(allocator, keypair, callback_url) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "回调解析或解密失败：{s}", .{@errorName(err)});
             defer allocator.free(msg);
-            const page = try renderPage(allocator, login_url, msg);
+            const page = try renderPage(allocator, login_url, port, msg);
             defer allocator.free(page);
             try sendHtml(stream, 400, page);
             return false;
@@ -107,16 +110,20 @@ fn handleConnection(
         flag.close();
 
         try sendHtml(stream, 200,
-            "<!doctype html><meta charset=\"utf-8\"><title>登录成功</title>"
-            ++ "<style>body{font-family:system-ui;max-width:760px;margin:80px auto;padding:24px;line-height:1.7}"
+            "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            ++ "<title>登录成功</title><style>body{font-family:system-ui;max-width:760px;margin:80px auto;padding:24px;line-height:1.7}"
             ++ ".ok{padding:20px;border:1px solid #b7e4c7;border-radius:12px;background:#f0fff4}</style>"
             ++ "<div class=\"ok\"><h2>✅ Zed 账号已保存</h2>"
-            ++ "<p>主服务正在自动重新加载账号。请返回 8001 的 Zed API 页面，等待几秒后刷新。</p></div>");
+            ++ "<p>服务正在切换到主界面。请回到当前服务器地址，稍后刷新即可。</p></div></html>");
         return true;
     }
 
-    try sendHtml(stream, 404, "<!doctype html><meta charset=\"utf-8\"><h1>404</h1>");
+    try sendHtml(stream, 404, "<!doctype html><meta charset=\"utf-8\"><h1>404</h1><p>首次配置请访问 <a href=\"/login\">/login</a></p>");
     return false;
+}
+
+fn isLoginPath(path: []const u8) bool {
+    return std.mem.eql(u8, path, "/login") or std.mem.eql(u8, path, "/login/") or std.mem.eql(u8, path, "/");
 }
 
 fn credentialsFromCallbackUrl(
@@ -151,27 +158,35 @@ fn credentialsFromCallbackUrl(
     return .{ .user_id = uid, .access_token = plaintext };
 }
 
-fn renderPage(allocator: std.mem.Allocator, login_url: []const u8, error_message: ?[]const u8) ![]u8 {
+fn renderPage(allocator: std.mem.Allocator, login_url: []const u8, port: u16, error_message: ?[]const u8) ![]u8 {
     const escaped_url = try htmlEscape(allocator, login_url);
     defer allocator.free(escaped_url);
-    const escaped_error = if (error_message) |msg| try htmlEscape(allocator, msg) else null;
-    defer if (escaped_error) |msg| allocator.free(msg);
+
+    var error_html: []const u8 = "";
+    var error_alloc: ?[]u8 = null;
+    defer if (error_alloc) |value| allocator.free(value);
+    if (error_message) |msg| {
+        const escaped = try htmlEscape(allocator, msg);
+        defer allocator.free(escaped);
+        error_alloc = try std.fmt.allocPrint(allocator, "<div class=\"err\">{s}</div>", .{escaped});
+        error_html = error_alloc.?;
+    }
 
     return std.fmt.allocPrint(allocator,
         "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        ++ "<title>Zed API 远程账号初始化</title><style>body{{font-family:system-ui;background:#f6f7f9;color:#202124;margin:0}}"
+        ++ "<title>Zed API 登录</title><style>body{{font-family:system-ui;background:#f6f7f9;color:#202124;margin:0}}"
         ++ ".card{{max-width:820px;margin:50px auto;background:white;padding:32px;border-radius:16px;box-shadow:0 6px 30px #0001}}"
         ++ "a.btn,button{{display:inline-block;background:#111827;color:white;padding:11px 18px;border-radius:9px;text-decoration:none;border:0;font-size:15px;cursor:pointer}}"
         ++ "textarea{{width:100%;box-sizing:border-box;min-height:120px;padding:12px;border:1px solid #ccd1d9;border-radius:9px;font-family:ui-monospace,monospace}}"
         ++ ".step{{margin:24px 0;padding:18px;border:1px solid #e5e7eb;border-radius:12px}}.err{{color:#b42318;background:#fff1f0;padding:12px;border-radius:8px}}"
-        ++ "code{{background:#f2f4f7;padding:2px 5px;border-radius:4px}}</style><div class=\"card\"><h1>Zed API 远程账号初始化</h1>"
-        ++ "<p>适用于 1Panel / Docker / 云服务器，无需 SSH 或容器终端。</p>"
-        ++ "{s}<div class=\"step\"><b>1. 打开 Zed 授权页面</b><p>完成 GitHub / Zed 登录后，浏览器会跳到 <code>127.0.0.1:8002</code>。"
-        ++ "因为这是远程服务器场景，该页面打不开是正常的。</p><a class=\"btn\" target=\"_blank\" rel=\"noreferrer\" href=\"{s}\">打开 Zed 授权</a></div>"
+        ++ "code{{background:#f2f4f7;padding:2px 5px;border-radius:4px}}</style><div class=\"card\"><h1>Zed API 登录</h1>"
+        ++ "<p>适用于 1Panel / Docker / 云服务器。整个项目只需要映射容器端口 <code>8001</code>。</p>"
+        ++ "{s}<div class=\"step\"><b>1. 打开 Zed 授权页面</b><p>完成 GitHub / Zed 登录后，浏览器会尝试打开 <code>127.0.0.1:{d}</code>。"
+        ++ "远程服务器场景下该页面打不开是正常的。</p><a class=\"btn\" target=\"_blank\" rel=\"noreferrer\" href=\"{s}\">打开 Zed 授权</a></div>"
         ++ "<div class=\"step\"><b>2. 复制失败页面地址栏中的完整 URL</b><p>必须包含 <code>user_id</code> 和 <code>access_token</code>。</p>"
-        ++ "<form method=\"post\" action=\"/complete\"><textarea name=\"callback_url\" required placeholder=\"http://127.0.0.1:8002/?user_id=...&access_token=...\"></textarea>"
+        ++ "<form method=\"post\" action=\"/login/complete\"><textarea name=\"callback_url\" required placeholder=\"http://127.0.0.1:{d}/?user_id=...&amp;access_token=...\"></textarea>"
         ++ "<p><button type=\"submit\">完成账号导入</button></p></form></div></div></html>",
-        .{ if (escaped_error) |msg| try std.fmt.allocPrint(allocator, "<div class=\"err\">{s}</div>", .{msg}) else "", escaped_url },
+        .{ error_html, port, escaped_url, port },
     );
 }
 
@@ -258,6 +273,12 @@ fn hexVal(c: u8) ?u8 {
     return null;
 }
 
+test "login page uses same-port path" {
+    try std.testing.expect(isLoginPath("/login"));
+    try std.testing.expect(isLoginPath("/login/"));
+    try std.testing.expect(!isLoginPath("/zed/login"));
+}
+
 test "queryValue extracts OAuth fields" {
     const query = "user_id=123&access_token=abc%2Bdef";
     try std.testing.expectEqualStrings("123", queryValue(query, "user_id").?);
@@ -265,7 +286,7 @@ test "queryValue extracts OAuth fields" {
 }
 
 test "urlDecode handles percent and form encoding" {
-    const decoded = try urlDecode(std.testing.allocator, "http%3A%2F%2F127.0.0.1%3A8002%2F%3Fa%3Db+c");
+    const decoded = try urlDecode(std.testing.allocator, "http%3A%2F%2F127.0.0.1%3A8001%2F%3Fa%3Db+c");
     defer std.testing.allocator.free(decoded);
-    try std.testing.expectEqualStrings("http://127.0.0.1:8002/?a=b c", decoded);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8001/?a=b c", decoded);
 }
