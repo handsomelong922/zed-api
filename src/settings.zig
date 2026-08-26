@@ -65,7 +65,9 @@ pub const ApiKeySettings = struct {
     }
 
     fn loadFile(self: *ApiKeySettings) void {
-        const bytes = std.fs.cwd().readFileAlloc(self.allocator, self.path, 64 * 1024) catch return;
+        const file = std.fs.cwd().openFile(self.path, .{}) catch return;
+        defer file.close();
+        const bytes = file.readToEndAlloc(self.allocator, 64 * 1024) catch return;
         defer self.allocator.free(bytes);
 
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, bytes, .{}) catch return;
@@ -120,21 +122,9 @@ pub const ApiKeySettings = struct {
         try std.json.Stringify.encodeJsonString(key, .{}, &json.writer);
         try json.writer.writeAll("}\n");
 
-        const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{self.path});
-        defer self.allocator.free(tmp_path);
-        {
-            const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
-            defer file.close();
-            try file.writeAll(json.written());
-            try file.sync();
-        }
-        errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
-
-        std.fs.cwd().deleteFile(self.path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
-        try std.fs.cwd().rename(tmp_path, self.path);
+        const file = try std.fs.cwd().createFile(self.path, .{});
+        defer file.close();
+        try file.writeAll(json.written());
 
         const owned = try self.allocator.dupe(u8, key);
         if (self.persisted_key) |old| self.allocator.free(old);
@@ -158,9 +148,6 @@ test "persisted key overrides environment fallback and survives reload" {
     var path_buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "settings-test-{d}.json", .{std.time.nanoTimestamp()});
     defer std.fs.cwd().deleteFile(path) catch {};
-    var tmp_buf: [132]u8 = undefined;
-    const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}.tmp", .{path});
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
     var first = try ApiKeySettings.initForTest(allocator, path, "env-secret");
     defer first.deinit();
@@ -183,16 +170,13 @@ test "clearing persisted key falls back to environment" {
     var path_buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "settings-clear-test-{d}.json", .{std.time.nanoTimestamp()});
     defer std.fs.cwd().deleteFile(path) catch {};
-    var tmp_buf: [132]u8 = undefined;
-    const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}.tmp", .{path});
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
-    var settings = try ApiKeySettings.initForTest(allocator, path, "env-secret");
-    defer settings.deinit();
-    try settings.saveKey("web-secret");
-    try settings.clearKey();
-    const status = settings.status();
-    try std.testing.expect(status.enabled);
-    try std.testing.expectEqual(Source.env, status.source);
-    try std.testing.expect(settings.authorize("env-secret"));
+    var settings_store = try ApiKeySettings.initForTest(allocator, path, "env-secret");
+    defer settings_store.deinit();
+    try settings_store.saveKey("web-secret");
+    try settings_store.clearKey();
+    const current = settings_store.status();
+    try std.testing.expect(current.enabled);
+    try std.testing.expectEqual(Source.env, current.source);
+    try std.testing.expect(settings_store.authorize("env-secret"));
 }
