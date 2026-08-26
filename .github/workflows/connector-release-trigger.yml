@@ -1,8 +1,9 @@
 name: Connector Release Trigger
 
 on:
-  issues:
-    types: [opened]
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,7 +11,6 @@ permissions:
 
 jobs:
   verify-and-publish:
-    if: github.event.issue.title == '[release-trigger] zed-api 8c43b40b'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
