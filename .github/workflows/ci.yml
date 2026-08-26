@@ -134,3 +134,36 @@ jobs:
           cancel_code="$(curl -sS -o /tmp/cancel.json -w '%{http_code}' -X POST http://127.0.0.1:18001/zed/login/cancel)"
           test "$cancel_code" = "200"
           curl -fsS http://127.0.0.1:18001/zed/login/status | grep -q '"status":"idle"'
+      - name: Verify optional ZED_API_KEY authentication
+        run: |
+          rm -rf /tmp/zed-api-auth-smoke
+          mkdir -p /tmp/zed-api-auth-smoke
+          printf '%s\n' '{"accounts":{"smoke":{"user_id":"1","credential":{"access_token":"dummy"}}}}' > /tmp/zed-api-auth-smoke/accounts.json
+
+          docker run -d --name zed-api-auth-open -p 18001:8001 -v /tmp/zed-api-auth-smoke:/data zed-api:smoke
+          trap 'docker logs zed-api-auth-open 2>/dev/null || true; docker logs zed-api-auth-keyed 2>/dev/null || true; docker rm -f zed-api-auth-open zed-api-auth-keyed >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18001/ >/dev/null; then break; fi
+            sleep 1
+          done
+          open_code="$(curl -sS -o /tmp/auth-open.json -w '%{http_code}' -X POST http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$open_code" = "200"
+          docker rm -f zed-api-auth-open >/dev/null
+
+          docker run -d --name zed-api-auth-keyed -p 18001:8001 -e ZED_API_KEY=test-secret -v /tmp/zed-api-auth-smoke:/data zed-api:smoke
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18001/ >/dev/null; then break; fi
+            sleep 1
+          done
+
+          missing_code="$(curl -sS -o /tmp/auth-missing.json -w '%{http_code}' -X POST http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$missing_code" = "401"
+
+          wrong_code="$(curl -sS -o /tmp/auth-wrong.json -w '%{http_code}' -X POST -H 'Authorization: Bearer wrong-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$wrong_code" = "401"
+
+          bearer_code="$(curl -sS -o /tmp/auth-bearer.json -w '%{http_code}' -X POST -H 'Authorization: Bearer test-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$bearer_code" = "200"
+
+          x_api_key_code="$(curl -sS -o /tmp/auth-x-api-key.json -w '%{http_code}' -X POST -H 'x-api-key: test-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
+          test "$x_api_key_code" = "200"
