@@ -90,6 +90,14 @@ http://服务器IP:34567
 
 `accounts.json` 和 `active_account.txt` 都会保存在 `/data`，升级或重建容器不会丢账号。
 
+如果端口会暴露到公网，建议在 1Panel 的容器环境变量中设置一把全局 API Key：
+
+```text
+ZED_API_KEY=你自己设置的密钥
+```
+
+设置后，`/v1/*` 与 `/api/event_logging/batch` 必须携带这把密钥。OpenAI 风格客户端使用 `Authorization: Bearer <ZED_API_KEY>`；Anthropic 风格客户端也可以使用 `x-api-key: <ZED_API_KEY>`。如果不设置或设置为空，则保持原来的无鉴权行为。Web 管理页、账号管理和登录流程不受这个变量影响。
+
 **首次没有账号时**，使用同一个自定义端口访问：
 
 ```text
@@ -115,6 +123,7 @@ docker run -d \
   --restart unless-stopped \
   --memory=384m \
   -p 34567:8001 \
+  -e ZED_API_KEY="change-this-to-your-own-secret" \
   -v "$PWD/data:/data" \
   ghcr.io/handsomelong922/zed-api:latest
 ```
@@ -123,7 +132,7 @@ docker run -d \
 
 > GHCR 首次创建 package 时，如果 GitHub 将 package visibility 默认为 Private，需要在 GitHub Packages 的该镜像设置中把 Visibility 改成 Public 一次；之后云服务器就可以无需 `docker login` 直接 `docker pull`。
 
-> 服务本身没有 API Key 鉴权。如果把自定义端口直接开放到公网，请通过安全组、反向代理或其他方式限制访问，避免账号额度被他人使用。
+> `ZED_API_KEY` 是可选的；公网部署建议务必设置，并使用足够长、不可猜测的随机值。服务不会在日志或 API 响应中输出这把密钥。
 
 #### Native Linux
 
@@ -158,6 +167,8 @@ Windows 健康检查：
 ```powershell
 Invoke-RestMethod -Uri 'http://127.0.0.1:8001/v1/models'
 ```
+
+如果启用了 `ZED_API_KEY`，客户端的 API Key 字段直接填写同一个值即可；客户端需要最终发送 `Authorization: Bearer <key>` 或 `x-api-key: <key>`。
 
 ### Codex
 
@@ -204,7 +215,7 @@ claude -p '请只回复：CLAUDE_OK'
 opencode run --model zed-local/gpt-5.6-terra --variant low "你的任务"
 ```
 
-`apiKey` 随便填个 `dummy`，本地不校验。
+未设置 `ZED_API_KEY` 时 `apiKey` 可以继续填 `dummy`；如果设置了 `ZED_API_KEY`，这里应填写同一个值。
 
 ## API
 
@@ -246,7 +257,7 @@ zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
 
 ## 已知限制
 
-- 服务本身无鉴权。公网部署时务必通过安全组、反向代理或其他访问控制保护自定义端口。
+- `ZED_API_KEY` 未设置或为空时，模型 API 保持无鉴权；公网部署建议设置该环境变量，并仍配合 HTTPS、防火墙或安全组使用。
 - Docker 镜像对普通 bridge 端口映射做了单端口适配；1Panel 只需映射容器 `8001`。
 - 请求格式完全按 Zed 官方客户端实现，但上游随时可能改协议或触发风控，不保证持续可用。
 - `count_tokens` 是兼容桩，别拿来精确计费。
