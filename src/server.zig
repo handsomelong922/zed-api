@@ -112,7 +112,12 @@ fn handleConnection(conn_stream: std.net.Stream) void {
     const full_path = parts.next() orelse return;
     const path = if (std.mem.indexOf(u8, full_path, "?")) |i| full_path[0..i] else full_path;
 
-    if (!std.mem.eql(u8, method, "OPTIONS") and isProtectedApiPath(path) and !api_settings.authorize(requestApiKey(headers))) {
+    const settings_mutation = std.mem.eql(u8, path, "/zed/settings/api-key") and
+        (std.mem.eql(u8, method, "POST") or std.mem.eql(u8, method, "DELETE"));
+    if (!std.mem.eql(u8, method, "OPTIONS") and
+        (isProtectedApiPath(path) or settings_mutation) and
+        !api_settings.authorize(requestApiKey(headers)))
+    {
         socket.writeResponse(conn_stream, 401, "{\"error\":{\"message\":\"invalid or missing API key\",\"type\":\"authentication_error\"}}");
         return;
     }
