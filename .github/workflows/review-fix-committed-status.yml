@@ -1,0 +1,58 @@
+name: Review Fix Committed Stream Failure
+
+on:
+  push:
+    branches: [fix/current-zed-stream-protocol]
+
+permissions:
+  contents: write
+
+jobs:
+  red-green-review-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/current-zed-stream-protocol
+          fetch-depth: 0
+
+      - name: Install Zig 0.15.2
+        run: |
+          curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo /opt/zig >> "$GITHUB_PATH"
+
+      - name: RED - committed completion failure cannot be treated as retryable response
+        run: |
+          python3 tools/review_fix_committed_status.py red
+          set +e
+          zig test src/stream.zig -lc > /tmp/red-committed.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/red-committed.log
+          if [ "$rc" -eq 0 ]; then
+            echo 'RED failure: committed-state regression passed before implementation' >&2
+            exit 1
+          fi
+          grep -q 'completion status failure preserves downstream commit state' /tmp/red-committed.log
+
+      - name: GREEN - preserve committed state on status.failed
+        run: |
+          python3 tools/review_fix_committed_status.py green
+          zig test src/stream.zig -lc
+
+      - name: Full regression suite and Linux release builds
+        run: |
+          zig build test
+          zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe
+          zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
+
+      - name: Commit reviewed fix
+        run: |
+          rm -f tools/review_fix_committed_status.py .github/workflows/review-fix-committed-status.yml
+          git add -A
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'fix: preserve committed state on streamed completion failure'
+          git push origin HEAD:fix/current-zed-stream-protocol
