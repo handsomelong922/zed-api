@@ -1,0 +1,43 @@
+name: Release Linux binaries
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        run: |
+          curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo /opt/zig >> "$GITHUB_PATH"
+
+      - name: Build embedded Web UI
+        run: |
+          cd webui
+          npm ci
+          npm run build
+
+      - name: Build release binaries
+        run: |
+          zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe --prefix dist/amd64
+          zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe --prefix dist/arm64
+          tar -C dist/amd64/bin -czf zed-api-linux-amd64.tar.gz zed2api
+          tar -C dist/arm64/bin -czf zed-api-linux-arm64.tar.gz zed2api
+          sha256sum zed-api-linux-*.tar.gz > SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            zed-api-linux-amd64.tar.gz
+            zed-api-linux-arm64.tar.gz
+            SHA256SUMS

@@ -1,0 +1,12 @@
+.git
+.github
+zig-cache
+.zig-cache
+zig-out
+webui/node_modules
+logs
+*.pid
+accounts.json
+active_account.txt
+*.log
+.DS_Store
