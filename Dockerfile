@@ -21,6 +21,15 @@ WORKDIR /src
 COPY . .
 RUN zig build test
 RUN cd webui && npm ci && npm run build
+
+# Native builds remain loopback-only. The Docker artifact alone is patched at
+# build time to listen on the container interface so ordinary 1Panel/Docker
+# port mapping works without a second listener or proxy process.
+RUN sed -i 's#http://127.0.0.1:{d}#http://0.0.0.0:{d}#' src/server.zig \
+ && sed -i 's/const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);/const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);/' src/server.zig \
+ && grep -F 'http://0.0.0.0:{d}' src/server.zig \
+ && grep -F 'const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);' src/server.zig
+
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) zig_target="x86_64-linux-musl" ;; \
@@ -30,7 +39,7 @@ RUN set -eux; \
     zig build -Dtarget="$zig_target" -Doptimize=ReleaseSafe
 
 FROM alpine:3.20 AS runtime
-RUN apk add --no-cache openssl socat
+RUN apk add --no-cache openssl
 WORKDIR /data
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /src/zig-out/bin/zed2api /usr/local/bin/zed2api
