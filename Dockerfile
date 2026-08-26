@@ -30,8 +30,7 @@ RUN set -eux; \
     zig build -Dtarget="$zig_target" -Doptimize=ReleaseSafe
 
 FROM alpine:3.20 AS runtime
-RUN apk add --no-cache openssl
-ENV ZED_API_HOST=0.0.0.0
+RUN apk add --no-cache openssl socat
 WORKDIR /data
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /src/zig-out/bin/zed2api /usr/local/bin/zed2api
