@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     // WebUI build step skipped: embedding the pre-built webui/dist/index.html
     // (avoids needing webui/node_modules for tsc + vite).
 
-    // Zig module
+    // Main API module.
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -21,16 +21,32 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
     });
 
-    // WebUI is pre-built; HTML embedded directly from webui/dist/index.html.
+    // Browser-only first-run account setup helper for Docker/VPS deployments.
+    const setup_mod = b.createModule(.{
+        .root_source_file = b.path("src/headless_login.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const setup_exe = b.addExecutable(.{
+        .name = "zed2api-setup",
+        .root_module = setup_mod,
+    });
 
     if (target.result.os.tag == .windows) {
         exe.root_module.linkSystemLibrary("bcrypt", .{});
         exe.root_module.linkSystemLibrary("advapi32", .{});
         exe.root_module.linkSystemLibrary("crypt32", .{});
         exe.root_module.linkSystemLibrary("ws2_32", .{});
+
+        setup_exe.root_module.linkSystemLibrary("bcrypt", .{});
+        setup_exe.root_module.linkSystemLibrary("advapi32", .{});
+        setup_exe.root_module.linkSystemLibrary("crypt32", .{});
+        setup_exe.root_module.linkSystemLibrary("ws2_32", .{});
     }
 
     b.installArtifact(exe);
+    b.installArtifact(setup_exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -41,9 +57,8 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run zed2api server");
     run_step.dependOn(&run_cmd.step);
 
-    // Keep protocol conversion and streaming behavior executable through the
-    // standard `zig build test` command. These two modules contain the request
-    // compatibility and SSE regression tests used by Codex/Claude Code.
+    // Keep protocol conversion, streaming behavior, and remote setup parsing
+    // executable through the standard `zig build test` command.
     const providers_test_mod = b.createModule(.{
         .root_source_file = b.path("src/providers.zig"),
         .target = target,
@@ -68,7 +83,23 @@ pub fn build(b: *std.Build) void {
     }
     const run_stream_tests = b.addRunArtifact(stream_tests);
 
-    const test_step = b.step("test", "Run protocol and streaming regression tests");
+    const setup_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/headless_login.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const setup_tests = b.addTest(.{ .root_module = setup_test_mod });
+    if (target.result.os.tag == .windows) {
+        setup_tests.root_module.linkSystemLibrary("bcrypt", .{});
+        setup_tests.root_module.linkSystemLibrary("advapi32", .{});
+        setup_tests.root_module.linkSystemLibrary("crypt32", .{});
+        setup_tests.root_module.linkSystemLibrary("ws2_32", .{});
+    }
+    const run_setup_tests = b.addRunArtifact(setup_tests);
+
+    const test_step = b.step("test", "Run protocol, streaming, and setup regression tests");
     test_step.dependOn(&run_providers_tests.step);
     test_step.dependOn(&run_stream_tests.step);
+    test_step.dependOn(&run_setup_tests.step);
 }
