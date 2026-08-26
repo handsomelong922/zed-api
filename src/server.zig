@@ -5,6 +5,7 @@ const zed = @import("zed.zig");
 const proxy = @import("proxy.zig");
 const providers = @import("providers.zig");
 const account_status = @import("account_status.zig");
+const settings = @import("settings.zig");
 const stream = @import("stream.zig");
 const socket = @import("socket.zig");
 const web_ui = @embedFile("web_index_html");
@@ -21,7 +22,7 @@ const HEALTH_PROBE_BODY =
 
 var account_mgr: accounts.AccountManager = undefined;
 var global_allocator: std.mem.Allocator = undefined;
-var api_key: ?[]const u8 = null;
+var api_settings: settings.ApiKeySettings = undefined;
 
 // Dynamic models cache
 var cached_models_openai: ?[]const u8 = null;
@@ -34,17 +35,13 @@ pub fn run(allocator: std.mem.Allocator, port: u16) !void {
     defer account_mgr.deinit();
     account_mgr.loadFromFile() catch {};
 
-    api_key = std.process.getEnvVarOwned(allocator, "ZED_API_KEY") catch null;
-    if (api_key) |key| {
-        if (key.len == 0) {
-            allocator.free(key);
-            api_key = null;
-        }
-    }
-    defer if (api_key) |key| allocator.free(key);
+    api_settings = settings.ApiKeySettings.init(allocator);
+    defer api_settings.deinit();
+    const key_status = api_settings.status();
 
     std.debug.print("[zed2api] http://127.0.0.1:{d}\n[zed2api] {d} account(s) loaded\n", .{ port, account_mgr.list.items.len });
-    if (api_key != null) std.debug.print("[zed2api] API key auth: enabled\n", .{});
+    if (key_status.enabled)
+        std.debug.print("[zed2api] API key auth: enabled ({s})\n", .{@tagName(key_status.source)});
 
     proxy.init(allocator);
     if (proxy.getHost()) |host| {
@@ -74,21 +71,21 @@ fn isProtectedApiPath(path: []const u8) bool {
     return std.mem.startsWith(u8, path, "/v1/") or std.mem.eql(u8, path, "/api/event_logging/batch");
 }
 
-fn requestHasValidApiKey(headers: []const u8, expected: []const u8) bool {
+fn requestApiKey(headers: []const u8) ?[]const u8 {
     var lines = std.mem.splitSequence(u8, headers, "\r\n");
     while (lines.next()) |line| {
         if (std.ascii.startsWithIgnoreCase(line, "authorization:")) {
             const value = std.mem.trim(u8, line["authorization:".len..], " \t");
             if (std.ascii.startsWithIgnoreCase(value, "Bearer ")) {
                 const token = std.mem.trim(u8, value["Bearer ".len..], " \t");
-                if (std.mem.eql(u8, token, expected)) return true;
+                if (token.len > 0) return token;
             }
         } else if (std.ascii.startsWithIgnoreCase(line, "x-api-key:")) {
             const value = std.mem.trim(u8, line["x-api-key:".len..], " \t");
-            if (std.mem.eql(u8, value, expected)) return true;
+            if (value.len > 0) return value;
         }
     }
-    return false;
+    return null;
 }
 
 fn handleConnection(conn_stream: std.net.Stream) void {
@@ -115,11 +112,9 @@ fn handleConnection(conn_stream: std.net.Stream) void {
     const full_path = parts.next() orelse return;
     const path = if (std.mem.indexOf(u8, full_path, "?")) |i| full_path[0..i] else full_path;
 
-    if (api_key) |expected| {
-        if (!std.mem.eql(u8, method, "OPTIONS") and isProtectedApiPath(path) and !requestHasValidApiKey(headers, expected)) {
-            socket.writeResponse(conn_stream, 401, "{\"error\":{\"message\":\"invalid or missing API key\",\"type\":\"authentication_error\"}}");
-            return;
-        }
+    if (!std.mem.eql(u8, method, "OPTIONS") and isProtectedApiPath(path) and !api_settings.authorize(requestApiKey(headers))) {
+        socket.writeResponse(conn_stream, 401, "{\"error\":{\"message\":\"invalid or missing API key\",\"type\":\"authentication_error\"}}");
+        return;
     }
 
     var content_length: usize = 0;
@@ -227,6 +222,12 @@ fn route(method: []const u8, path: []const u8, body: []const u8) !Response {
         return .{ .status = 200, .body = "{\"status\":\"ok\"}" };
     if (std.mem.startsWith(u8, path, "/v1/messages/count_tokens"))
         return .{ .status = 200, .body = "{\"input_tokens\":0}" };
+    if (std.mem.eql(u8, path, "/zed/settings/api-key") and std.mem.eql(u8, method, "GET"))
+        return apiKeyStatusResponse();
+    if (std.mem.eql(u8, path, "/zed/settings/api-key") and std.mem.eql(u8, method, "POST"))
+        return handleSaveApiKey(body);
+    if (std.mem.eql(u8, path, "/zed/settings/api-key") and std.mem.eql(u8, method, "DELETE"))
+        return handleClearApiKey();
     if (std.mem.eql(u8, path, "/zed/accounts") and std.mem.eql(u8, method, "GET"))
         return try handleListAccounts();
     if (std.mem.eql(u8, path, "/zed/accounts/status") and std.mem.eql(u8, method, "GET"))
@@ -256,6 +257,46 @@ fn route(method: []const u8, path: []const u8, body: []const u8) !Response {
     if (std.mem.eql(u8, method, "OPTIONS"))
         return .{ .status = 200, .body = "" };
     return .{ .status = 404, .body = "{\"error\":\"not found\"}" };
+}
+
+fn apiKeyStatusResponse() Response {
+    const status = api_settings.status();
+    return switch (status.source) {
+        .none => .{ .status = 200, .body = "{\"enabled\":false,\"source\":\"none\"}" },
+        .file => .{ .status = 200, .body = "{\"enabled\":true,\"source\":\"file\"}" },
+        .env => .{ .status = 200, .body = "{\"enabled\":true,\"source\":\"env\"}" },
+    };
+}
+
+fn handleSaveApiKey(body: []const u8) Response {
+    const parsed = std.json.parseFromSlice(std.json.Value, global_allocator, body, .{}) catch
+        return .{ .status = 400, .body = "{\"error\":\"invalid json\"}" };
+    defer parsed.deinit();
+    if (parsed.value != .object)
+        return .{ .status = 400, .body = "{\"error\":\"request body must be an object\"}" };
+    const value = parsed.value.object.get("api_key") orelse
+        return .{ .status = 400, .body = "{\"error\":\"missing api_key\"}" };
+    if (value != .string)
+        return .{ .status = 400, .body = "{\"error\":\"api_key must be a string\"}" };
+    const key = std.mem.trim(u8, value.string, " \t\r\n");
+    if (key.len == 0)
+        return .{ .status = 400, .body = "{\"error\":\"api_key cannot be empty\"}" };
+
+    api_settings.saveKey(key) catch |err| {
+        std.debug.print("[settings] failed to save API key: {}\n", .{err});
+        return .{ .status = 500, .body = "{\"error\":\"failed to save api key\"}" };
+    };
+    std.debug.print("[settings] API key updated from Web UI\n", .{});
+    return apiKeyStatusResponse();
+}
+
+fn handleClearApiKey() Response {
+    api_settings.clearKey() catch |err| {
+        std.debug.print("[settings] failed to clear API key: {}\n", .{err});
+        return .{ .status = 500, .body = "{\"error\":\"failed to clear api key\"}" };
+    };
+    std.debug.print("[settings] persisted API key cleared\n", .{});
+    return apiKeyStatusResponse();
 }
 
 // ── Non-streaming proxy with failover ──
