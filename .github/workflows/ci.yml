@@ -105,3 +105,28 @@ jobs:
           done
           echo 'main server was not reachable through the same single Docker port mapping' >&2
           exit 1
+      - name: Verify main Web UI remote OAuth can accept a pasted callback
+        run: |
+          rm -rf /tmp/zed-api-oauth-smoke
+          mkdir -p /tmp/zed-api-oauth-smoke
+          printf '%s\n' '{"accounts":{"smoke":{"user_id":"1","credential":{"access_token":"dummy"}}}}' > /tmp/zed-api-oauth-smoke/accounts.json
+          docker run -d --name zed-api-oauth-smoke -p 18001:8001 -v /tmp/zed-api-oauth-smoke:/data zed-api:smoke
+          trap 'docker logs zed-api-oauth-smoke || true; docker rm -f zed-api-oauth-smoke >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 20); do
+            curl -fsS http://127.0.0.1:18001/ >/dev/null && break
+            sleep 1
+          done
+
+          start_json="$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:18001/zed/login)"
+          echo "$start_json" | grep -q '"login_url":"https://zed.dev/native_app_signin'
+
+          status_json="$(curl -fsS http://127.0.0.1:18001/zed/login/status)"
+          echo "$status_json" | grep -q '"status":"waiting"'
+          echo "$status_json" | grep -q '"login_url":"https://zed.dev/native_app_signin'
+
+          complete_code="$(curl -sS -o /tmp/complete.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:18001/zed/login/complete)"
+          test "$complete_code" = "400"
+
+          cancel_code="$(curl -sS -o /tmp/cancel.json -w '%{http_code}' -X POST http://127.0.0.1:18001/zed/login/cancel)"
+          test "$cancel_code" = "200"
+          curl -fsS http://127.0.0.1:18001/zed/login/status | grep -q '"status":"idle"'
