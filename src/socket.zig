@@ -49,6 +49,7 @@ pub fn writeResponseWithType(stream: std.net.Stream, status: u16, body: []const 
     const status_text = switch (status) {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         413 => "Payload Too Large",
         500 => "Internal Server Error",
