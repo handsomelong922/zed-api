@@ -1,4 +1,5 @@
 const std = @import("std");
+const completion_status = @import("completion_status.zig");
 
 /// Map Claude Code model names to Zed-compatible names.
 /// Every Claude request routes to claude-sonnet-5 and every GPT request to a
@@ -350,7 +351,7 @@ pub fn buildZedPayload(allocator: std.mem.Allocator, body: []const u8, is_anthro
 
     var uuid_buf1: [36]u8 = undefined;
     var uuid_buf2: [36]u8 = undefined;
-    try w.print("{{\"thread_id\":\"{s}\",\"prompt_id\":\"{s}\",\"intent\":\"user_prompt\",\"provider\":\"{s}\",\"model\":\"{s}\",\"provider_request\":{{", .{
+    try w.print("{{\"thread_id\":\"{s}\",\"prompt_id\":\"{s}\",\"provider\":\"{s}\",\"model\":\"{s}\",\"provider_request\":{{", .{
         fakeUuid(&uuid_buf1), fakeUuid(&uuid_buf2), provider, model,
     });
 
@@ -999,7 +1000,7 @@ fn buildOpenAIRequest(allocator: std.mem.Allocator, w: *std.io.Writer, parsed: s
     // Codex already sends OpenAI Responses input. Preserve its request shape
     // instead of trying to reinterpret it as Chat Completions messages.
     if (!is_anthropic and parsed.object.get("input") != null) {
-        return buildNativeResponsesRequest(w, parsed, model, is_anthropic);
+        return buildNativeResponsesRequest(allocator, w, parsed, model, is_anthropic);
     }
 
     try w.print("\"model\":\"{s}\",\"stream\":true,\"input\":[", .{model});
@@ -1129,6 +1130,44 @@ const GPT_REASONING_OUTPUT_FLOOR: i64 = 32768;
 /// Canonicalize those forms at the provider boundary. Already-typed Codex
 /// items (function_call, function_call_output, reasoning, etc.) pass through
 /// unchanged.
+fn isNativeResponsesInstructionItem(item: std.json.Value) bool {
+    if (item != .object) return false;
+    const role = switch (item.object.get("role") orelse return false) {
+        .string => |value| value,
+        else => return false,
+    };
+    return isSystemInstructionRole(role);
+}
+
+fn collectNativeResponsesInstructions(allocator: std.mem.Allocator, parsed: std.json.Value) !?[]u8 {
+    var buf: std.io.Writer.Allocating = .init(allocator);
+    errdefer buf.deinit();
+    var wrote_any = false;
+
+    if (parsed.object.get("instructions")) |instructions| {
+        if (instructions == .string and instructions.string.len > 0) {
+            try buf.writer.writeAll(instructions.string);
+            wrote_any = true;
+        }
+    }
+
+    if (parsed.object.get("input")) |input| {
+        if (input == .array) {
+            for (input.array.items) |item| {
+                if (!isNativeResponsesInstructionItem(item)) continue;
+                const content = item.object.get("content") orelse continue;
+                try appendContentText(&buf.writer, content, &wrote_any);
+            }
+        }
+    }
+
+    if (!wrote_any) {
+        buf.deinit();
+        return null;
+    }
+    return try buf.toOwnedSlice();
+}
+
 fn writeNativeResponsesInput(w: *std.io.Writer, input: std.json.Value) !void {
     switch (input) {
         .string => |text| {
@@ -1149,6 +1188,7 @@ fn writeNativeResponsesInput(w: *std.io.Writer, input: std.json.Value) !void {
                     // declarations. Zed expects declarations at top-level.
                     if (std.mem.eql(u8, item_type, "additional_tools")) continue;
                 }
+                if (isNativeResponsesInstructionItem(item)) continue;
                 if (!first) try w.writeAll(",");
                 first = false;
                 if (isResponsesMessageItem(item)) {
@@ -1205,14 +1245,7 @@ fn writeCanonicalResponsesMessage(w: *std.io.Writer, item: std.json.Value) !void
         try w.writeAll(",");
         try std.json.Stringify.encodeJsonString(key, .{}, w);
         try w.writeAll(":");
-        if (std.mem.eql(u8, key, "role") and
-            entry.value_ptr.* == .string and
-            std.mem.eql(u8, entry.value_ptr.string, "developer"))
-        {
-            // Zed's hosted parser predates the Responses developer role. A
-            // system message preserves the instruction priority it supports.
-            try w.writeAll("\"system\"");
-        } else if (std.mem.eql(u8, key, "content") and entry.value_ptr.* == .string) {
+        if (std.mem.eql(u8, key, "content") and entry.value_ptr.* == .string) {
             try w.print("[{{\"type\":\"{s}\",\"text\":", .{content_type});
             try std.json.Stringify.encodeJsonString(entry.value_ptr.string, .{}, w);
             try w.writeAll("}]");
@@ -1227,11 +1260,13 @@ fn writeCanonicalResponsesMessage(w: *std.io.Writer, item: std.json.Value) !void
 /// the fields the local proxy owns. Keeping the remaining fields intact is
 /// important for Codex tool calls, encrypted reasoning continuity and request
 /// metadata added by newer clients.
-fn buildNativeResponsesRequest(w: *std.io.Writer, parsed: std.json.Value, model: []const u8, is_anthropic: bool) !void {
+fn buildNativeResponsesRequest(allocator: std.mem.Allocator, w: *std.io.Writer, parsed: std.json.Value, model: []const u8, is_anthropic: bool) !void {
     try w.writeAll("\"model\":");
     try std.json.Stringify.encodeJsonString(model, .{}, w);
     try w.writeAll(",\"stream\":true");
     const selected_tool_name = if (parsed.object.get("tool_choice")) |choice| namedToolChoice(choice) else null;
+    const instructions = try collectNativeResponsesInstructions(allocator, parsed);
+    defer if (instructions) |value| allocator.free(value);
 
     var it = parsed.object.iterator();
     while (it.next()) |entry| {
@@ -1243,7 +1278,8 @@ fn buildNativeResponsesRequest(w: *std.io.Writer, parsed: std.json.Value, model:
             std.mem.eql(u8, key, "max_output_tokens") or
             std.mem.eql(u8, key, "max_completion_tokens") or
             std.mem.eql(u8, key, "max_tokens") or
-            std.mem.eql(u8, key, "tools"))
+            std.mem.eql(u8, key, "tools") or
+            (instructions != null and std.mem.eql(u8, key, "instructions")))
         {
             continue;
         }
@@ -1258,6 +1294,11 @@ fn buildNativeResponsesRequest(w: *std.io.Writer, parsed: std.json.Value, model:
         } else {
             try std.json.Stringify.value(entry.value_ptr.*, .{}, w);
         }
+    }
+
+    if (instructions) |value| {
+        try w.writeAll(",\"instructions\":");
+        try std.json.Stringify.encodeJsonString(value, .{}, w);
     }
 
     try writeMergedResponsesToolsForZed(w, parsed.object.get("tools"), parsed.object.get("input"), selected_tool_name);
@@ -1372,10 +1413,10 @@ test "native Responses normalizes Codex additional tools and developer role for 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
     const request = parsed.value.object.get("provider_request").?.object;
+    try std.testing.expectEqualStrings("follow project rules", request.get("instructions").?.string);
     const input = request.get("input").?.array;
-    try std.testing.expectEqual(@as(usize, 2), input.items.len);
-    try std.testing.expectEqualStrings("system", input.items[0].object.get("role").?.string);
-    try std.testing.expectEqualStrings("user", input.items[1].object.get("role").?.string);
+    try std.testing.expectEqual(@as(usize, 1), input.items.len);
+    try std.testing.expectEqualStrings("user", input.items[0].object.get("role").?.string);
 
     const tools = request.get("tools").?.array;
     try std.testing.expectEqual(@as(usize, 2), tools.items.len);
@@ -2068,6 +2109,15 @@ pub fn convertToResponses(allocator: std.mem.Allocator, response: []const u8, mo
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
         defer parsed.deinit();
         if (parsed.value != .object) continue;
+
+        var control = completion_status.parseLine(allocator, line);
+        defer control.deinit(allocator);
+        if (control.kind == .failed) {
+            std.debug.print("[zed] completion failed: code={s} message={s}\n", .{ control.code orelse "unknown", control.message orelse "unknown" });
+            return error.UpstreamError;
+        }
+        if (control.kind == .queued or control.kind == .started or control.kind == .stream_ended or control.kind == .unknown_status) continue;
+
         const event = parsed.value.object.get("event") orelse parsed.value;
         if (event != .object) continue;
         const event_type = switch (event.object.get("type") orelse continue) {
@@ -2179,4 +2229,30 @@ pub fn convertToAnthropic(allocator: std.mem.Allocator, response: []const u8, mo
     const stop_reason = if (sc.tool_calls != null) "tool_use" else "end_turn";
     try w.print("],\"stop_reason\":\"{s}\"}}", .{stop_reason});
     return try result.toOwnedSlice();
+}
+
+test "current native Responses moves developer/system input to top-level instructions" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"model":"gpt-5.6-luna","stream":true,"instructions":"base instruction","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer instruction"}]},{"type":"message","role":"system","content":"system instruction"},{"type":"message","role":"user","content":"ping"}]}
+    ;
+    const payload = try buildZedPayload(allocator, body, false);
+    defer allocator.free(payload);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    const request = parsed.value.object.get("provider_request").?.object;
+    try std.testing.expectEqualStrings("base instruction\n\ndeveloper instruction\n\nsystem instruction", request.get("instructions").?.string);
+    const input = request.get("input").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), input.len);
+    try std.testing.expectEqualStrings("user", input[0].object.get("role").?.string);
+}
+
+test "current Zed completion envelope omits legacy intent field" {
+    const allocator = std.testing.allocator;
+    const payload = try buildZedPayload(allocator, "{\"model\":\"gpt-5.6-luna\",\"input\":\"ping\"}", false);
+    defer allocator.free(payload);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("intent") == null);
 }
