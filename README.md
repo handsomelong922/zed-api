@@ -1,10 +1,10 @@
 # zed-api
 
-把 Zed 托管的模型转成本地 OpenAI / Anthropic 接口，让 **Codex、Claude Code、OpenCode** 直接连本机用。
+把 Zed 托管的模型转成本地 OpenAI / Anthropic 接口，让 **Codex、Claude Code、OpenCode** 直接连接使用。
 
 三种协议（Responses / Chat Completions / Messages）都支持流式和工具调用，自带多账号调度、额度查看和中文 Web 管理页。
 
-> 服务固定监听 `http://127.0.0.1:8001`，只在本机用，别暴露公网。
+> 原生运行默认只监听 `127.0.0.1:8001`。Docker 镜像针对 1Panel / VPS 做了单端口适配，只需要映射容器端口 `8001`。
 
 ## 效果
 
@@ -68,9 +68,44 @@ GitHub Actions 会构建 Linux amd64 / arm64 二进制，并发布多架构镜�
 ghcr.io/handsomelong922/zed-api:latest
 ```
 
-#### Docker（推荐用于低配 VPS）
+#### 1Panel / Docker（推荐用于低配 VPS）
 
-项目固定监听 `127.0.0.1`。为了既保持这个安全默认值，又不增加额外 TCP 转发进程，Linux Docker 部署使用 host network：
+Docker 只需要一个容器端口：
+
+```text
+8001
+```
+
+在 1Panel 中填写镜像 `ghcr.io/handsomelong922/zed-api:latest`，把你自定义的宿主机端口映射到容器端口 `8001`。例如宿主机端口选择 `34567`，访问地址就是：
+
+```text
+http://服务器IP:34567
+```
+
+同时把宿主机的持久化目录挂载到：
+
+```text
+/data
+```
+
+`accounts.json` 和 `active_account.txt` 都会保存在 `/data`，升级或重建容器不会丢账号。
+
+**首次没有账号时**，使用同一个自定义端口访问：
+
+```text
+http://服务器IP:你的自定义端口/login
+```
+
+不需要 SSH、容器终端，也不需要再映射其他端口。登录流程：
+
+1. 打开 `/login` 页面，点击“打开 Zed 授权”。
+2. 在 Zed / GitHub 页面完成授权。
+3. 浏览器最后会尝试打开本机 `127.0.0.1:8001`；远程服务器部署时这个页面打不开是正常现象。
+4. 复制浏览器地址栏中的完整 URL（必须包含 `user_id` 与 `access_token`）。
+5. 回到服务器的 `/login` 页面，把 URL 粘贴进去并点击“完成账号导入”。
+6. 账号保存后服务会自动切换到正常 API/Web 管理页，随后刷新原来的服务器地址即可。
+
+普通 Docker 命令对应写法：
 
 ```sh
 mkdir -p data
@@ -79,30 +114,16 @@ docker run -d \
   --name zed-api \
   --restart unless-stopped \
   --memory=384m \
-  --network host \
+  -p 34567:8001 \
   -v "$PWD/data:/data" \
   ghcr.io/handsomelong922/zed-api:latest
 ```
 
-容器工作目录是 `/data`，`accounts.json` 和 `active_account.txt` 都会保存在挂载目录中，升级或重建容器不会丢账号。
-
-首次登录账号：
-
-```sh
-docker exec -it zed-api zed2api login my-account
-```
-
-服务仍然只监听宿主机：
-
-```text
-http://127.0.0.1:8001
-```
-
-因此不要用普通 `-p 8001:8001` 代替 `--network host`：应用在容器内部只监听 loopback，Docker bridge 模式下宿主机端口映射无法访问这个 listener。
-
-如果需要远程访问，请在宿主机前面增加带鉴权的 Nginx/Caddy、VPN、Tailscale 或 Cloudflare Tunnel。项目本身没有 API 鉴权，不要直接把 8001 裸露到公网。
+这里的 `34567` 只是示例，可以替换成你在服务器上选择的任意可用端口；**容器端口始终保持 `8001`，无需额外端口。**
 
 > GHCR 首次创建 package 时，如果 GitHub 将 package visibility 默认为 Private，需要在 GitHub Packages 的该镜像设置中把 Visibility 改成 Public 一次；之后云服务器就可以无需 `docker login` 直接 `docker pull`。
+
+> 服务本身没有 API Key 鉴权。如果把自定义端口直接开放到公网，请通过安全组、反向代理或其他方式限制访问，避免账号额度被他人使用。
 
 #### Native Linux
 
@@ -119,7 +140,7 @@ chmod +x zed2api
 ./zed2api serve 8001
 ```
 
-原生 Linux 同样只监听 `127.0.0.1:8001`，特别适合直接配合 systemd + 本机反向代理使用。
+原生 Linux 默认监听 `127.0.0.1:8001`，适合直接配合 systemd + 本机反向代理使用。
 
 Windows 健康检查：
 
@@ -200,8 +221,9 @@ opencode run --model zed-local/gpt-5.6-terra --variant low "你的任务"
 | POST | `/zed/accounts/switch` | 切换当前账号 |
 | GET | `/zed/usage` | 当前账号用量 |
 | GET | `/zed/billing` | 当前账号账单 |
-| POST | `/zed/login` | 发起 GitHub OAuth 登录 |
-| GET | `/zed/login/status` | 查询登录状态 |
+| GET | `/login` | Docker / 1Panel 首次账号初始化 |
+| POST | `/zed/login` | 本机管理页发起 GitHub OAuth 登录 |
+| GET | `/zed/login/status` | 查询本机登录状态 |
 
 ## 构建
 
@@ -224,11 +246,11 @@ zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
 
 ## 已知限制
 
-- 服务本身无鉴权，默认只监听 `127.0.0.1`。想通过中转/反代分享给别人用的话，务必自己在前面加一层鉴权，否则等于把账号额度裸奔出去。
-- Docker 采用 Linux `--network host`，这是为了保持 loopback-only 监听且不增加额外代理进程；Docker Desktop 的 host network 行为与原生 Linux 不完全相同，本方案主要面向 Linux VPS。
+- 服务本身无鉴权。公网部署时务必通过安全组、反向代理或其他访问控制保护自定义端口。
+- Docker 镜像对普通 bridge 端口映射做了单端口适配；1Panel 只需映射容器 `8001`。
 - 请求格式完全按 Zed 官方客户端实现，但上游随时可能改协议或触发风控，不保证持续可用。
 - `count_tokens` 是兼容桩，别拿来精确计费。
-- 有些 Zed 套餐不公开数值额度，管理页只能显示"未公开"，精确金额去 Zed 官网看。
+- 有些 Zed 套餐不公开数值额度，管理页只能显示“未公开”，精确金额去 Zed 官网看。
 - 一次调度最多尝试 64 个账号。
 
 ## License
