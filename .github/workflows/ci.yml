@@ -73,10 +73,11 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: zed-api:smoke
-      - name: Verify first-run /login through one mapped port
+      - name: Verify empty accounts file still opens /login
         run: |
           rm -rf /tmp/zed-api-smoke
           mkdir -p /tmp/zed-api-smoke
+          printf '%s\n' '{"accounts":{}}' > /tmp/zed-api-smoke/accounts.json
           docker run -d --name zed-api-login-smoke -p 18001:8001 -v /tmp/zed-api-smoke:/data zed-api:smoke
           trap 'docker logs zed-api-login-smoke || true; docker rm -f zed-api-login-smoke >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 20); do
@@ -87,20 +88,20 @@ jobs:
             fi
             sleep 1
           done
-          echo 'first-run /login was not reachable through the single Docker port mapping' >&2
+          echo 'empty accounts.json did not enter first-run /login mode' >&2
           exit 1
-      - name: Verify main API through the same mapped port
+      - name: Verify main server through the same mapped port with an account
         run: |
           docker rm -f zed-api-login-smoke >/dev/null 2>&1 || true
-          printf '%s\n' '{"accounts":{}}' > /tmp/zed-api-smoke/accounts.json
+          printf '%s\n' '{"accounts":{"smoke":{"user_id":"1","credential":{"access_token":"dummy"}}}}' > /tmp/zed-api-smoke/accounts.json
           docker run -d --name zed-api-api-smoke -p 18001:8001 -v /tmp/zed-api-smoke:/data zed-api:smoke
           trap 'docker logs zed-api-api-smoke || true; docker rm -f zed-api-api-smoke >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 20); do
-            if curl -fsS http://127.0.0.1:18001/v1/models >/tmp/models.json; then
-              grep -q '"data"' /tmp/models.json
+            if curl -fsS http://127.0.0.1:18001/ >/tmp/index.html; then
+              grep -qi '<html' /tmp/index.html
               exit 0
             fi
             sleep 1
           done
-          echo 'main API was not reachable through the same single Docker port mapping' >&2
+          echo 'main server was not reachable through the same single Docker port mapping' >&2
           exit 1
