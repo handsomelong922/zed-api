@@ -1,0 +1,119 @@
+name: Hotfix Current Zed Protocol
+
+on:
+  push:
+    branches: [fix/current-zed-stream-protocol]
+
+permissions:
+  contents: write
+
+jobs:
+  red-green-hotfix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/current-zed-stream-protocol
+          fetch-depth: 0
+
+      - name: Install Zig 0.15.2
+        run: |
+          curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo /opt/zig >> "$GITHUB_PATH"
+
+      - name: RED - Zed completion control statuses are not provider events
+        run: |
+          python3 tools/apply_current_zed_hotfix.py red-status
+          set +e
+          zig test src/completion_status.zig -lc > /tmp/red-status.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/red-status.log
+          if [ "$rc" -eq 0 ]; then
+            echo 'RED failure: status regression unexpectedly passed before implementation' >&2
+            exit 1
+          fi
+          grep -q 'completion status parser distinguishes control messages' /tmp/red-status.log
+
+      - name: GREEN - implement Zed completion status parser
+        run: |
+          python3 tools/apply_current_zed_hotfix.py green-status
+          zig test src/completion_status.zig -lc
+
+      - name: RED - current Responses instructions and envelope semantics
+        run: |
+          python3 tools/apply_current_zed_hotfix.py red-providers
+          set +e
+          zig test src/providers.zig -lc > /tmp/red-providers.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/red-providers.log
+          if [ "$rc" -eq 0 ]; then
+            echo 'RED failure: provider regression unexpectedly passed before implementation' >&2
+            exit 1
+          fi
+          grep -Eq 'current native Responses moves developer/system|current Zed completion envelope omits legacy intent' /tmp/red-providers.log
+
+      - name: GREEN - align Responses request with current Zed protocol
+        run: |
+          python3 tools/apply_current_zed_hotfix.py green-providers
+          zig test src/providers.zig -lc
+
+      - name: RED - Responses terminal bridge and event classification
+        run: |
+          python3 tools/apply_current_zed_hotfix.py red-stream
+          set +e
+          zig test src/stream.zig -lc > /tmp/red-stream.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/red-stream.log
+          if [ "$rc" -eq 0 ]; then
+            echo 'RED failure: streaming regression unexpectedly passed before implementation' >&2
+            exit 1
+          fi
+          grep -Eq 'Responses stream classifier|Responses stream bridges' /tmp/red-stream.log
+
+      - name: GREEN - keep Zed control statuses out of downstream SSE
+        run: |
+          python3 tools/apply_current_zed_hotfix.py green-stream
+          zig test src/stream.zig -lc
+
+      - name: RED-GREEN - current stable Zed client version header
+        run: |
+          if grep -q 'pub const ZED_VERSION = "1.16.2";' src/proxy.zig; then
+            echo 'RED failure: version was already current before hotfix' >&2
+            exit 1
+          fi
+          python3 tools/apply_current_zed_hotfix.py proxy-version
+          grep -q 'pub const ZED_VERSION = "1.16.2";' src/proxy.zig
+          grep -q 'pub const USER_AGENT = "Zed/" ++ ZED_VERSION' src/proxy.zig
+
+      - name: Add status parser to standard test graph
+        run: python3 tools/apply_current_zed_hotfix.py build
+
+      - name: Full Zig regression suite
+        run: zig build test
+
+      - name: Build embedded Web UI
+        run: |
+          cd webui
+          npm ci
+          npm run build
+
+      - name: Build native and Linux release targets
+        run: |
+          zig build -Doptimize=ReleaseSafe
+          zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe
+          zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
+
+      - name: Commit verified hotfix to branch
+        run: |
+          rm -f tools/apply_current_zed_hotfix.py .github/workflows/hotfix-current-zed-protocol.yml
+          git add -A
+          git status --short
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'fix: align streaming with current Zed completion protocol [hotfix-applied]'
+          git push origin HEAD:fix/current-zed-stream-protocol
