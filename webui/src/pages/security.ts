@@ -2,6 +2,8 @@ import { clearApiKey, fetchApiKeySettings, saveApiKey, type ApiKeySettingsStatus
 import { icons } from '../icons'
 import { showToast } from '../toast'
 
+let currentStatus: ApiKeySettingsStatus = { enabled: false, source: 'none' }
+
 function statusLabel(status: ApiKeySettingsStatus): string {
   if (!status.enabled) return '未启用'
   if (status.source === 'file') return '已启用 · 网页配置'
@@ -11,15 +13,20 @@ function statusLabel(status: ApiKeySettingsStatus): string {
 
 function statusDescription(status: ApiKeySettingsStatus): string {
   if (!status.enabled) return '模型 API 当前不校验访问密钥。公网部署建议设置一把足够长的随机 Key。'
-  if (status.source === 'file') return '当前使用网页保存的密钥，已持久化到 /data/settings.json，并且立即生效。'
-  return '当前使用 ZED_API_KEY 环境变量。你可以在这里保存新密钥覆盖它。'
+  if (status.source === 'file') return '当前使用网页保存的密钥，已持久化到 /data/settings.json，并且立即生效。修改或清除时需要输入当前 Key 验证身份。'
+  return '当前使用 ZED_API_KEY 环境变量。保存网页密钥前，需要先输入当前环境变量 Key 验证身份。'
 }
 
 function updateStatus(status: ApiKeySettingsStatus) {
+  currentStatus = status
   const chip = document.getElementById('api-key-status')
   const detail = document.getElementById('api-key-detail')
+  const currentKeyGroup = document.getElementById('current-api-key-group') as HTMLElement | null
+  const currentKeyInput = document.getElementById('current-api-key-input') as HTMLInputElement | null
   if (chip) chip.textContent = statusLabel(status)
   if (detail) detail.textContent = statusDescription(status)
+  if (currentKeyGroup) currentKeyGroup.hidden = !status.enabled
+  if (!status.enabled && currentKeyInput) currentKeyInput.value = ''
 }
 
 async function refreshStatus() {
@@ -32,6 +39,7 @@ async function refreshStatus() {
 }
 
 export function renderSecurity() {
+  currentStatus = { enabled: false, source: 'none' }
   const page = document.getElementById('page-security')!
   page.innerHTML = `
     <div class="page-heading">
@@ -56,6 +64,15 @@ export function renderSecurity() {
         </header>
         <div class="integration-body">
           <p id="api-key-detail">正在读取当前设置。</p>
+
+          <div id="current-api-key-group" hidden>
+            <label for="current-api-key-input" style="display:block;font-weight:700;margin:18px 0 8px">当前 API Key（验证身份）</label>
+            <input id="current-api-key-input" type="password" autocomplete="current-password" spellcheck="false"
+              placeholder="请输入当前正在使用的 API Key"
+              style="width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid #b8c5d5;border-radius:9px;font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace" />
+            <p style="margin-top:9px">已有 Key 时，修改或清除配置必须先验证当前 Key。该输入只用于本次请求，不会保存在浏览器。</p>
+          </div>
+
           <label for="api-key-input" style="display:block;font-weight:700;margin:18px 0 8px">输入新的 API Key</label>
           <div style="display:flex;gap:9px;align-items:stretch;flex-wrap:wrap">
             <input id="api-key-input" type="password" autocomplete="new-password" spellcheck="false"
@@ -74,6 +91,7 @@ export function renderSecurity() {
   `
 
   const input = document.getElementById('api-key-input') as HTMLInputElement
+  const currentKeyInput = document.getElementById('current-api-key-input') as HTMLInputElement
   const toggle = document.getElementById('toggle-api-key') as HTMLButtonElement
   const save = document.getElementById('save-api-key') as HTMLButtonElement
   const clear = document.getElementById('clear-api-key') as HTMLButtonElement
@@ -91,10 +109,18 @@ export function renderSecurity() {
       input.focus()
       return
     }
+    const currentKey = currentKeyInput.value.trim()
+    if (currentStatus.enabled && !currentKey) {
+      showToast('请输入当前 API Key 以验证身份')
+      currentKeyInput.focus()
+      return
+    }
+
     save.disabled = true
     try {
-      const status = await saveApiKey(value)
+      const status = await saveApiKey(value, currentStatus.enabled ? currentKey : undefined)
       input.value = ''
+      currentKeyInput.value = ''
       input.type = 'password'
       toggle.textContent = '显示'
       updateStatus(status)
@@ -107,9 +133,17 @@ export function renderSecurity() {
   })
 
   clear.addEventListener('click', async () => {
+    const currentKey = currentKeyInput.value.trim()
+    if (currentStatus.enabled && !currentKey) {
+      showToast('请输入当前 API Key 以验证身份')
+      currentKeyInput.focus()
+      return
+    }
+
     clear.disabled = true
     try {
-      const status = await clearApiKey()
+      const status = await clearApiKey(currentStatus.enabled ? currentKey : undefined)
+      currentKeyInput.value = ''
       updateStatus(status)
       showToast(status.source === 'env' ? '网页密钥已清除，已回退到环境变量' : 'API Key 已清除')
     } catch (error) {
