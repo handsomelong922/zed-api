@@ -91,6 +91,11 @@ export interface LoginState {
   error?: string
 }
 
+export interface ApiKeySettingsStatus {
+  enabled: boolean
+  source: 'none' | 'file' | 'env'
+}
+
 export async function fetchAccounts(): Promise<AccountsResponse> {
   const r = await fetch('/zed/accounts')
   if (!r.ok) throw new Error(`${r.status}`)
@@ -174,6 +179,31 @@ export async function completeLogin(callbackUrl: string): Promise<LoginState> {
 export async function cancelLogin(): Promise<LoginState> {
   const r = await fetch('/zed/login/cancel', { method: 'POST' })
   const data = await r.json() as LoginState
+  if (!r.ok) throw new Error(data.error ?? `${r.status}`)
+  return data
+}
+
+export async function fetchApiKeySettings(): Promise<ApiKeySettingsStatus> {
+  const r = await fetch('/zed/settings/api-key', { cache: 'no-store' })
+  const data = await r.json() as ApiKeySettingsStatus & { error?: string }
+  if (!r.ok) throw new Error(data.error ?? `${r.status}`)
+  return data
+}
+
+export async function saveApiKey(apiKey: string): Promise<ApiKeySettingsStatus> {
+  const r = await fetch('/zed/settings/api-key', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: apiKey }),
+  })
+  const data = await r.json() as ApiKeySettingsStatus & { error?: string }
+  if (!r.ok) throw new Error(data.error ?? `${r.status}`)
+  return data
+}
+
+export async function clearApiKey(): Promise<ApiKeySettingsStatus> {
+  const r = await fetch('/zed/settings/api-key', { method: 'DELETE' })
+  const data = await r.json() as ApiKeySettingsStatus & { error?: string }
   if (!r.ok) throw new Error(data.error ?? `${r.status}`)
   return data
 }
