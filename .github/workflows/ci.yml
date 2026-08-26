@@ -158,6 +158,8 @@ jobs:
 
           missing_code="$(curl -sS -o /tmp/auth-missing.json -w '%{http_code}' -X POST http://127.0.0.1:18001/v1/messages/count_tokens)"
           test "$missing_code" = "401"
+          missing_status="$(curl -sS -D - -o /dev/null -X POST http://127.0.0.1:18001/v1/messages/count_tokens | head -n 1 | tr -d '\r')"
+          test "$missing_status" = "HTTP/1.1 401 Unauthorized"
 
           wrong_code="$(curl -sS -o /tmp/auth-wrong.json -w '%{http_code}' -X POST -H 'Authorization: Bearer wrong-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
           test "$wrong_code" = "401"
@@ -167,3 +169,6 @@ jobs:
 
           x_api_key_code="$(curl -sS -o /tmp/auth-x-api-key.json -w '%{http_code}' -X POST -H 'x-api-key: test-secret' http://127.0.0.1:18001/v1/messages/count_tokens)"
           test "$x_api_key_code" = "200"
+
+          options_code="$(curl -sS -o /tmp/auth-options.txt -w '%{http_code}' -X OPTIONS http://127.0.0.1:18001/v1/messages)"
+          test "$options_code" = "200"
