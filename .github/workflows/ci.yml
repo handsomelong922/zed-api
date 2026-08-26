@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        run: |
+          curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo /opt/zig >> "$GITHUB_PATH"
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Build Linux amd64
+        run: zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe --prefix zig-out/linux-amd64
+
+      - name: Build Linux arm64
+        run: zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe --prefix zig-out/linux-arm64
+
+      - name: Upload Linux binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            zig-out/linux-amd64/bin/zed2api
+            zig-out/linux-arm64/bin/zed2api
