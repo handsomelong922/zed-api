@@ -49,7 +49,10 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8001
 
+# Probe an unprotected local page so enabling ZED_API_KEY does not make an
+# otherwise healthy container fail its own health check. /login covers the
+# first-run setup helper before the main Web UI starts.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:8001/v1/models >/dev/null || wget -qO- http://127.0.0.1:8001/login >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:8001/ >/dev/null || wget -qO- http://127.0.0.1:8001/login >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
