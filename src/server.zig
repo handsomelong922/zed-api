@@ -21,6 +21,7 @@ const HEALTH_PROBE_BODY =
 
 var account_mgr: accounts.AccountManager = undefined;
 var global_allocator: std.mem.Allocator = undefined;
+var api_key: ?[]const u8 = null;
 
 // Dynamic models cache
 var cached_models_openai: ?[]const u8 = null;
@@ -33,7 +34,17 @@ pub fn run(allocator: std.mem.Allocator, port: u16) !void {
     defer account_mgr.deinit();
     account_mgr.loadFromFile() catch {};
 
+    api_key = std.process.getEnvVarOwned(allocator, "ZED_API_KEY") catch null;
+    if (api_key) |key| {
+        if (key.len == 0) {
+            allocator.free(key);
+            api_key = null;
+        }
+    }
+    defer if (api_key) |key| allocator.free(key);
+
     std.debug.print("[zed2api] http://127.0.0.1:{d}\n[zed2api] {d} account(s) loaded\n", .{ port, account_mgr.list.items.len });
+    if (api_key != null) std.debug.print("[zed2api] API key auth: enabled\n", .{});
 
     proxy.init(allocator);
     if (proxy.getHost()) |host| {
@@ -59,6 +70,27 @@ pub fn run(allocator: std.mem.Allocator, port: u16) !void {
     }
 }
 
+fn isProtectedApiPath(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "/v1/") or std.mem.eql(u8, path, "/api/event_logging/batch");
+}
+
+fn requestHasValidApiKey(headers: []const u8, expected: []const u8) bool {
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    while (lines.next()) |line| {
+        if (std.ascii.startsWithIgnoreCase(line, "authorization:")) {
+            const value = std.mem.trim(u8, line["authorization:".len..], " \t");
+            if (std.ascii.startsWithIgnoreCase(value, "Bearer ")) {
+                const token = std.mem.trim(u8, value["Bearer ".len..], " \t");
+                if (std.mem.eql(u8, token, expected)) return true;
+            }
+        } else if (std.ascii.startsWithIgnoreCase(line, "x-api-key:")) {
+            const value = std.mem.trim(u8, line["x-api-key:".len..], " \t");
+            if (std.mem.eql(u8, value, expected)) return true;
+        }
+    }
+    return false;
+}
+
 fn handleConnection(conn_stream: std.net.Stream) void {
     defer conn_stream.close();
 
@@ -82,6 +114,13 @@ fn handleConnection(conn_stream: std.net.Stream) void {
     const method = parts.next() orelse return;
     const full_path = parts.next() orelse return;
     const path = if (std.mem.indexOf(u8, full_path, "?")) |i| full_path[0..i] else full_path;
+
+    if (api_key) |expected| {
+        if (isProtectedApiPath(path) and !requestHasValidApiKey(headers, expected)) {
+            socket.writeResponse(conn_stream, 401, "{\"error\":{\"message\":\"invalid or missing API key\",\"type\":\"authentication_error\"}}");
+            return;
+        }
+    }
 
     var content_length: usize = 0;
     var header_lines = std.mem.splitSequence(u8, headers, "\r\n");
@@ -777,7 +816,6 @@ fn handleLoginComplete(body: []const u8) !Response {
         return .{ .status = 400, .body = "{\"error\":\"missing callback_url\"}" };
     if (callback_value != .string or callback_value.string.len == 0)
         return .{ .status = 400, .body = "{\"error\":\"callback_url must be a string\"}" };
-
     const creds = credentialsFromCallbackUrl(global_allocator, &pending.keypair, callback_value.string) catch |err| {
         const error_body = try std.fmt.allocPrint(global_allocator,
             "{{\"error\":\"callback parse/decrypt failed: {s}\"}}",
