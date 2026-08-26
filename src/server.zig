@@ -116,7 +116,7 @@ fn handleConnection(conn_stream: std.net.Stream) void {
     const path = if (std.mem.indexOf(u8, full_path, "?")) |i| full_path[0..i] else full_path;
 
     if (api_key) |expected| {
-        if (isProtectedApiPath(path) and !requestHasValidApiKey(headers, expected)) {
+        if (!std.mem.eql(u8, method, "OPTIONS") and isProtectedApiPath(path) and !requestHasValidApiKey(headers, expected)) {
             socket.writeResponse(conn_stream, 401, "{\"error\":{\"message\":\"invalid or missing API key\",\"type\":\"authentication_error\"}}");
             return;
         }
