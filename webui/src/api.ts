@@ -190,10 +190,15 @@ export async function fetchApiKeySettings(): Promise<ApiKeySettingsStatus> {
   return data
 }
 
-export async function saveApiKey(apiKey: string): Promise<ApiKeySettingsStatus> {
+function settingsAuthHeaders(currentKey?: string): Record<string, string> {
+  const key = currentKey?.trim()
+  return key ? { Authorization: `Bearer ${key}` } : {}
+}
+
+export async function saveApiKey(apiKey: string, currentKey?: string): Promise<ApiKeySettingsStatus> {
   const r = await fetch('/zed/settings/api-key', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...settingsAuthHeaders(currentKey) },
     body: JSON.stringify({ api_key: apiKey }),
   })
   const data = await r.json() as ApiKeySettingsStatus & { error?: string }
@@ -201,8 +206,11 @@ export async function saveApiKey(apiKey: string): Promise<ApiKeySettingsStatus> 
   return data
 }
 
-export async function clearApiKey(): Promise<ApiKeySettingsStatus> {
-  const r = await fetch('/zed/settings/api-key', { method: 'DELETE' })
+export async function clearApiKey(currentKey?: string): Promise<ApiKeySettingsStatus> {
+  const r = await fetch('/zed/settings/api-key', {
+    method: 'DELETE',
+    headers: settingsAuthHeaders(currentKey),
+  })
   const data = await r.json() as ApiKeySettingsStatus & { error?: string }
   if (!r.ok) throw new Error(data.error ?? `${r.status}`)
   return data
