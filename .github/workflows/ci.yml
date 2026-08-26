@@ -24,6 +24,12 @@ jobs:
       - name: Run tests
         run: zig build test
 
+      - name: Build embedded Web UI
+        run: |
+          cd webui
+          npm ci
+          npm run build
+
       - name: Build Linux amd64
         run: zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe --prefix zig-out/linux-amd64
 
