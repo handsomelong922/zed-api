@@ -12,23 +12,6 @@ if [ ! -s accounts.json ]; then
   rm -f setup-complete.flag
 fi
 
-# The upstream program intentionally binds loopback only. Keep that native
-# safety behavior unchanged, and bridge the single Docker-facing port to an
-# internal loopback listener. No second port needs to be exposed or configured
-# in 1Panel.
-/usr/local/bin/zed2api serve 8002 &
-api_pid=$!
-socat TCP-LISTEN:8001,reuseaddr,fork,bind=0.0.0.0 TCP:127.0.0.1:8002 &
-proxy_pid=$!
-
-cleanup() {
-  kill "$proxy_pid" "$api_pid" 2>/dev/null || true
-  wait "$proxy_pid" "$api_pid" 2>/dev/null || true
-}
-trap cleanup INT TERM EXIT
-
-while kill -0 "$api_pid" 2>/dev/null && kill -0 "$proxy_pid" 2>/dev/null; do
-  sleep 2
-done
-
-exit 1
+# The Docker build is compiled to listen on 0.0.0.0:8001, so no additional
+# internal/external port and no forwarding process are needed.
+exec /usr/local/bin/zed2api serve 8001
