@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$BUILDPLATFORM alpine:3.20 AS builder
+FROM --platform=$BUILDPLATFORM node:22.23.2-alpine3.23 AS builder
 
 ARG ZIG_VERSION=0.15.2
 ARG TARGETARCH
-RUN apk add --no-cache ca-certificates curl xz nodejs npm
+RUN apk add --no-cache ca-certificates curl xz
 RUN set -eux; \
     case "$(uname -m)" in \
       x86_64) zig_arch="x86_64" ;; \
@@ -20,7 +20,7 @@ RUN set -eux; \
 WORKDIR /src
 COPY . .
 RUN zig build test
-RUN cd webui && npm ci && npm run build
+RUN cd webui && npm ci --engine-strict && npm audit --audit-level=low && npm run build
 
 # Native builds remain loopback-only. The Docker artifact alone is patched at
 # build time to listen on the container interface so ordinary 1Panel/Docker
