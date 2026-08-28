@@ -1,0 +1,38 @@
+name: Refresh Web Lock
+
+on:
+  push:
+    branches: [chore/refresh-web-build-chain]
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-lock:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chore/refresh-web-build-chain
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+
+      - name: Regenerate and verify Web UI lockfile
+        run: |
+          cd webui
+          npm install --package-lock-only --engine-strict
+          npm ci --engine-strict
+          npm audit --audit-level=low
+          npm run build
+
+      - name: Commit generated lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add webui/package-lock.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: refresh Web UI lockfile"
+          git push origin HEAD:chore/refresh-web-build-chain
