@@ -68,6 +68,15 @@ pub fn build(b: *std.Build) void {
     const providers_tests = b.addTest(.{ .root_module = providers_test_mod });
     const run_providers_tests = b.addRunArtifact(providers_tests);
 
+    const provider_compat_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/provider_compat_regression_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const provider_compat_tests = b.addTest(.{ .root_module = provider_compat_test_mod });
+    const run_provider_compat_tests = b.addRunArtifact(provider_compat_tests);
+
     const stream_test_mod = b.createModule(.{
         .root_source_file = b.path("src/stream.zig"),
         .target = target,
@@ -118,6 +127,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run protocol, streaming, settings, and setup regression tests");
     test_step.dependOn(&run_providers_tests.step);
+    test_step.dependOn(&run_provider_compat_tests.step);
     test_step.dependOn(&run_stream_tests.step);
     test_step.dependOn(&run_completion_status_tests.step);
     test_step.dependOn(&run_settings_tests.step);
