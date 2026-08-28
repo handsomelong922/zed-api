@@ -24,6 +24,7 @@ jobs:
         run: |
           cd webui
           npm install --package-lock-only --engine-strict
+          npm audit fix --package-lock-only --engine-strict
           npm ci --engine-strict
           npm audit --audit-level=low
           npm run build
