@@ -89,3 +89,22 @@ test "native Anthropic tool_result preserves explicit is_error true" {
     try std.testing.expect(is_error == .bool);
     try std.testing.expect(is_error.bool);
 }
+
+test "OpenAI tool result routed to Sonnet 5 gets is_error false" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"model":"claude-sonnet-5","messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"}]}
+    ;
+    const payload = try providers.buildZedPayload(allocator, body, false);
+    defer allocator.free(payload);
+
+    const parsed = try providerRequest(allocator, payload);
+    defer parsed.deinit();
+    const request = parsed.value.object.get("provider_request").?.object;
+    const messages = request.get("messages").?.array;
+    const content = messages.items[1].object.get("content").?.array;
+    const tool_result = content.items[0].object;
+    const is_error = tool_result.get("is_error") orelse return error.MissingIsError;
+    try std.testing.expect(is_error == .bool);
+    try std.testing.expect(!is_error.bool);
+}
