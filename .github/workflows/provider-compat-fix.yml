@@ -1,0 +1,169 @@
+name: Apply Provider Compatibility Fix
+
+on:
+  push:
+    branches: [fix/provider-compat-20260828]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/provider-compat-20260828
+
+      - name: Apply minimal provider-boundary fix
+        run: |
+          cat > /tmp/provider-compat.patch <<'PATCH'
+          diff --git a/src/providers.zig b/src/providers.zig
+          --- a/src/providers.zig
+          +++ b/src/providers.zig
+          @@
+           fn isSystemInstructionRole(role: []const u8) bool {
+               return std.mem.eql(u8, role, "system") or std.mem.eql(u8, role, "developer");
+           }
+          +
+          +/// New hosted reasoning models reject the legacy sampling temperature
+          +/// even when compatibility clients still send it. Drop it only at the
+          +/// provider boundary for the models proven to reject/deprecate it.
+          +fn modelRejectsTemperature(model: []const u8) bool {
+          +    return std.mem.startsWith(u8, model, "gpt-5.6") or std.mem.eql(u8, model, "claude-sonnet-5");
+          +}
+          @@
+          -/// Write Anthropic-native message (passthrough content as-is, including tool_use/tool_result)
+          -fn writeAnthropicMessage(w: *std.io.Writer, msg: std.json.Value) !void {
+          -    if (msg != .object) return;
+          -    const content = msg.object.get("content") orelse return;
+          -    if (content != .string) {
+          -        // Array content is already the official Anthropic representation. Keep
+          -        // tool_use/tool_result/cache_control blocks byte-for-structure intact.
+          -        try std.json.Stringify.value(msg, .{}, w);
+          -        return;
+          -    }
+          +/// Zed's internal Anthropic RequestContent requires `tool_result.is_error`
+          +/// even though the public Anthropic API treats it as optional/default false.
+          +/// Preserve every client field and inject only the missing compatibility bit.
+          +fn writeAnthropicContentArray(w: *std.io.Writer, content: std.json.Value) !void {
+          +    try w.writeAll("[");
+          +    for (content.array.items, 0..) |block, index| {
+          +        if (index > 0) try w.writeAll(",");
+          +        if (block != .object) {
+          +            try std.json.Stringify.value(block, .{}, w);
+          +            continue;
+          +        }
+          +        const block_type = switch (block.object.get("type") orelse .null) {
+          +            .string => |value| value,
+          +            else => "",
+          +        };
+          +        if (!std.mem.eql(u8, block_type, "tool_result") or block.object.get("is_error") != null) {
+          +            try std.json.Stringify.value(block, .{}, w);
+          +            continue;
+          +        }
+          +
+          +        try w.writeAll("{");
+          +        var first = true;
+          +        var it = block.object.iterator();
+          +        while (it.next()) |entry| {
+          +            if (!first) try w.writeAll(",");
+          +            first = false;
+          +            try std.json.Stringify.encodeJsonString(entry.key_ptr.*, .{}, w);
+          +            try w.writeAll(":");
+          +            try std.json.Stringify.value(entry.value_ptr.*, .{}, w);
+          +        }
+          +        if (!first) try w.writeAll(",");
+          +        try w.writeAll("\"is_error\":false}");
+          +    }
+          +    try w.writeAll("]");
+          +}
+          +
+          +/// Write Anthropic-native message while preserving official content and
+          +/// canonicalizing only the small differences in Zed's internal parser.
+          +fn writeAnthropicMessage(w: *std.io.Writer, msg: std.json.Value) !void {
+          +    if (msg != .object) return;
+          +    const content = msg.object.get("content") orelse return;
+          +    if (content == .array) {
+          +        try w.writeAll("{");
+          +        var first = true;
+          +        var it = msg.object.iterator();
+          +        while (it.next()) |entry| {
+          +            if (!first) try w.writeAll(",");
+          +            first = false;
+          +            try std.json.Stringify.encodeJsonString(entry.key_ptr.*, .{}, w);
+          +            try w.writeAll(":");
+          +            if (std.mem.eql(u8, entry.key_ptr.*, "content")) {
+          +                try writeAnthropicContentArray(w, entry.value_ptr.*);
+          +            } else {
+          +                try std.json.Stringify.value(entry.value_ptr.*, .{}, w);
+          +            }
+          +        }
+          +        try w.writeAll("}");
+          +        return;
+          +    }
+          +    if (content != .string) {
+          +        try std.json.Stringify.value(msg, .{}, w);
+          +        return;
+          +    }
+           
+               // Anthropic publicly accepts string shorthand, while Zed's provider parser
+               // requires a sequence of content blocks. Canonicalize only that field.
+          @@
+                   switch (content) {
+                       .string => try std.json.Stringify.encodeJsonString(content.string, .{}, w),
+                       else => try std.json.Stringify.value(content, .{}, w),
+                   }
+          +        try w.writeAll(",\"is_error\":false");
+                   try w.writeAll("}]}");
+                   return;
+               }
+          @@
+          -    if (parsed.object.get("temperature")) |temp| {
+          -        try w.writeAll("\"temperature\":");
+          -        try std.json.Stringify.value(temp, .{}, w);
+          -        try w.writeAll(",");
+          +    if (!modelRejectsTemperature(model)) {
+          +        if (parsed.object.get("temperature")) |temp| {
+          +            try w.writeAll("\"temperature\":");
+          +            try std.json.Stringify.value(temp, .{}, w);
+          +            try w.writeAll(",");
+          +        }
+               }
+          @@
+                   std.mem.eql(u8, key, "max_completion_tokens") or
+                   std.mem.eql(u8, key, "max_tokens") or
+                   std.mem.eql(u8, key, "tools") or
+          +        (modelRejectsTemperature(model) and std.mem.eql(u8, key, "temperature")) or
+                   (instructions != null and std.mem.eql(u8, key, "instructions")))
+               {
+          PATCH
+          git apply --check /tmp/provider-compat.patch
+          git apply /tmp/provider-compat.patch
+
+      - name: Install Zig 0.15.2
+        run: |
+          curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo /opt/zig >> "$GITHUB_PATH"
+
+      - name: Verify provider regressions and full Zig tests
+        run: zig build test
+
+      - name: Verify Web UI remains buildable
+        run: |
+          cd webui
+          npm ci --engine-strict
+          npm audit --audit-level=low
+          npm run build
+
+      - name: Commit verified fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/providers.zig
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: normalize provider-specific request fields"
+          git push origin HEAD:fix/provider-compat-20260828
