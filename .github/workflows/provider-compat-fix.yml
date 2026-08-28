@@ -133,11 +133,19 @@ jobs:
               "Sonnet temperature omission",
           )
 
-          once(
-              '        std.mem.eql(u8, key, "max_completion_tokens") or\n        std.mem.eql(u8, key, "max_tokens") or\n        std.mem.eql(u8, key, "tools") or\n        (instructions != null and std.mem.eql(u8, key, "instructions")))\n',
-              '        std.mem.eql(u8, key, "max_completion_tokens") or\n        std.mem.eql(u8, key, "max_tokens") or\n        std.mem.eql(u8, key, "tools") or\n        (modelRejectsTemperature(model) and std.mem.eql(u8, key, "temperature")) or\n        (instructions != null and std.mem.eql(u8, key, "instructions")))\n',
-              "GPT-5.6 Responses temperature omission",
+          fn_anchor = 'fn buildNativeResponsesRequest('
+          fn_start = text.index(fn_anchor)
+          fn_end = text.index('\n}\n\ntest "native Responses keeps the historical GPT 5.5 xhigh policy"', fn_start)
+          fn_text = text[fn_start:fn_end]
+          instruction_line = '            (instructions != null and std.mem.eql(u8, key, "instructions")))'
+          if fn_text.count(instruction_line) != 1:
+              raise SystemExit(f"Responses instruction guard: expected 1 match, found {fn_text.count(instruction_line)}")
+          fn_text = fn_text.replace(
+              instruction_line,
+              '            (modelRejectsTemperature(model) and std.mem.eql(u8, key, "temperature")) or\n' + instruction_line,
+              1,
           )
+          text = text[:fn_start] + fn_text + text[fn_end:]
 
           path.write_text(text)
           PY
