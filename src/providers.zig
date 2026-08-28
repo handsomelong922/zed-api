@@ -114,6 +114,11 @@ fn isSystemInstructionRole(role: []const u8) bool {
     return std.mem.eql(u8, role, "system") or std.mem.eql(u8, role, "developer");
 }
 
+/// Hosted GPT-5.6 and Sonnet 5 reject/deprecate legacy sampling temperature.
+fn modelRejectsTemperature(model: []const u8) bool {
+    return std.mem.startsWith(u8, model, "gpt-5.6") or std.mem.eql(u8, model, "claude-sonnet-5");
+}
+
 /// Some OpenAI-compatible clients keep system/developer instructions in
 /// `messages`. Claude Code 2.1.205 can also append a message-level `system`
 /// instruction alongside Anthropic's official top-level `system` blocks.
@@ -211,13 +216,63 @@ fn writeMessage(w: *std.io.Writer, msg: std.json.Value) !void {
     try w.writeAll("}");
 }
 
-/// Write Anthropic-native message (passthrough content as-is, including tool_use/tool_result)
+/// Zed's internal Anthropic RequestContent requires `tool_result.is_error`
+/// even though the public Anthropic API permits omission when the result succeeded.
+fn writeAnthropicContentArray(w: *std.io.Writer, content: std.json.Value) !void {
+    try w.writeAll("[");
+    for (content.array.items, 0..) |block, index| {
+        if (index > 0) try w.writeAll(",");
+        if (block != .object) {
+            try std.json.Stringify.value(block, .{}, w);
+            continue;
+        }
+        const block_type = switch (block.object.get("type") orelse .null) {
+            .string => |value| value,
+            else => "",
+        };
+        if (!std.mem.eql(u8, block_type, "tool_result") or block.object.get("is_error") != null) {
+            try std.json.Stringify.value(block, .{}, w);
+            continue;
+        }
+        try w.writeAll("{");
+        var first = true;
+        var it = block.object.iterator();
+        while (it.next()) |entry| {
+            if (!first) try w.writeAll(",");
+            first = false;
+            try std.json.Stringify.encodeJsonString(entry.key_ptr.*, .{}, w);
+            try w.writeAll(":");
+            try std.json.Stringify.value(entry.value_ptr.*, .{}, w);
+        }
+        if (!first) try w.writeAll(",");
+        try w.writeAll("\"is_error\":false}");
+    }
+    try w.writeAll("]");
+}
+
+/// Write Anthropic-native message while preserving all client fields.
 fn writeAnthropicMessage(w: *std.io.Writer, msg: std.json.Value) !void {
     if (msg != .object) return;
     const content = msg.object.get("content") orelse return;
+    if (content == .array) {
+        try w.writeAll("{");
+        var first = true;
+        var it = msg.object.iterator();
+        while (it.next()) |entry| {
+            if (!first) try w.writeAll(",");
+            first = false;
+            try std.json.Stringify.encodeJsonString(entry.key_ptr.*, .{}, w);
+            try w.writeAll(":");
+            if (std.mem.eql(u8, entry.key_ptr.*, "content")) {
+                try writeAnthropicContentArray(w, entry.value_ptr.*);
+            } else {
+                try std.json.Stringify.value(entry.value_ptr.*, .{}, w);
+            }
+        }
+        try w.writeAll("}");
+        return;
+    }
     if (content != .string) {
-        // Array content is already the official Anthropic representation. Keep
-        // tool_use/tool_result/cache_control blocks byte-for-structure intact.
         try std.json.Stringify.value(msg, .{}, w);
         return;
     }
@@ -265,7 +320,7 @@ fn writeMessageWithToolSupport(w: *std.io.Writer, msg: std.json.Value, allocator
             .string => try std.json.Stringify.encodeJsonString(content.string, .{}, w),
             else => try std.json.Stringify.value(content, .{}, w),
         }
-        try w.writeAll("}]}");
+        try w.writeAll(",\"is_error\":false}]}");
         return;
     }
 
@@ -405,10 +460,12 @@ fn buildAnthropicRequest(allocator: std.mem.Allocator, w: *std.io.Writer, parsed
         try std.json.Stringify.encodeJsonString(text, .{}, w);
         try w.writeAll(",");
     }
-    if (parsed.object.get("temperature")) |temp| {
-        try w.writeAll("\"temperature\":");
-        try std.json.Stringify.value(temp, .{}, w);
-        try w.writeAll(",");
+    if (!modelRejectsTemperature(model)) {
+        if (parsed.object.get("temperature")) |temp| {
+            try w.writeAll("\"temperature\":");
+            try std.json.Stringify.value(temp, .{}, w);
+            try w.writeAll(",");
+        }
     }
     if (parsed.object.get("thinking")) |thinking| {
         try w.writeAll("\"thinking\":");
@@ -1279,6 +1336,7 @@ fn buildNativeResponsesRequest(allocator: std.mem.Allocator, w: *std.io.Writer, 
             std.mem.eql(u8, key, "max_completion_tokens") or
             std.mem.eql(u8, key, "max_tokens") or
             std.mem.eql(u8, key, "tools") or
+            (modelRejectsTemperature(model) and std.mem.eql(u8, key, "temperature")) or
             (instructions != null and std.mem.eql(u8, key, "instructions")))
         {
             continue;
